@@ -1,0 +1,10 @@
+{
+  // WXT generates .wxt/tsconfig.json during `wxt prepare` (run automatically by `npm install`).
+  // It already enables strict mode, noUncheckedIndexedAccess, noImplicitOverride,
+  // noFallthroughCasesInSwitch and verbatimModuleSyntax.
+  "extends": "./.wxt/tsconfig.json",
+  "compilerOptions": {
+    "strict": true,
+    "jsx": "react-jsx"
+  }
+}

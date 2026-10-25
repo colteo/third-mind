@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# WXT generated files and build output
+.wxt/
+.output/
+web-ext.config.ts
+
+# Test coverage
+coverage/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor and OS files
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local environment
+.env
+.env.*
