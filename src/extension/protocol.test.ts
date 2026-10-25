@@ -252,9 +252,21 @@ describe('page check messages', () => {
   it('accepts page check results as a separate host message', () => {
     const message = {
       type: 'page-check',
-      check: { provider: 'chatgpt', tabId: 1, result: { ok: false, failure: { kind: 'timeout', outcome: 'unknown' } } },
+      check: { provider: 'chatgpt', tabId: 1, linkRevision: 1, checkedAt: '2026-10-25T12:00:00Z', result: { ok: false, failure: { kind: 'timeout', outcome: 'unknown' } } },
     };
     expect(parseHostMessage(message)).toEqual(message);
     expect(parseHostMessage({ type: 'page-check', check: { provider: 'chatgpt', tabId: 1 } })).toBeNull();
+  });
+});
+
+
+describe('retired API protocol', () => {
+  it.each(['pair-bridge', 'bridge-status', 'start-api'])('rejects retired command %s', (type) => {
+    expect(parseClientMessage({ type, sessionId: 's-1', code: 'old-code', topic: 'T', constraints: [], maximumCalls: 8, outputTokens: 512, debateOutputTokens: 4096 })).toBeNull();
+  });
+
+  it('rejects retired bridge messages and API snapshots', () => {
+    expect(parseHostMessage({ type: 'bridge-status', status: {}, error: null })).toBeNull();
+    expect(parseHostMessage({ type: 'snapshot', snapshot: { mode: 'api', participants: [], liveParticipants: [] } })).toBeNull();
   });
 });

@@ -4,6 +4,8 @@ import { describe, expect, it } from 'vitest';
 import type { LivePreflightResult, PreflightTarget, ProviderCapabilities, ProviderPreflight } from '../../application';
 import type { ConversationProviderId } from '../../domain';
 import { Header } from './Header';
+import { ModeSelector } from './ModeSelector';
+import { EXECUTION_MODES } from '../../application';
 import { LiveDebateSetup, liveStartState, targetDescription } from './LiveDebateSetup';
 
 /** Static render tests (no DOM), like Results.test.ts. */
@@ -145,10 +147,21 @@ describe('live debate setup', () => {
 
   it('labels the execution mode in the header', () => {
     const live = renderToStaticMarkup(createElement(Header, { status: null, connection: 'connected', mode: 'live' }));
-    expect(live).toContain('Live mode');
+    expect(live).toContain('Browser Conversations');
+    expect(live).toContain('Autonomous submission and reply acquisition are unavailable');
     const simulation = renderToStaticMarkup(
       createElement(Header, { status: null, connection: 'connected', mode: 'simulation' }),
     );
     expect(simulation).toContain('Simulation mode');
   });
+});
+
+
+it('offers only Simulation and Browser Conversations', () => {
+  expect(EXECUTION_MODES).toEqual(['simulation', 'live']);
+  const markup = renderToStaticMarkup(createElement(ModeSelector, { mode: 'live', onChange: () => undefined }));
+  expect(markup.match(/type="radio"/g)).toHaveLength(2);
+  expect(markup).toContain('Simulation');
+  expect(markup).toContain('Browser Conversations');
+  expect(markup).toContain('Automated execution is currently unavailable');
 });

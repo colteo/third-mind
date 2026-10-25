@@ -1,6 +1,6 @@
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { ConnectionsView, LinkedConversationView, ProviderConnectionsView } from '../../application';
 import type { PageCheckView } from '../../extension/protocol';
 import { ConversationConnections } from './ConversationConnections';
@@ -302,6 +302,8 @@ describe('page connection checks', () => {
   const readyCheck: PageCheckView = {
     provider: 'chatgpt',
     tabId: 5,
+    linkRevision: 1,
+    checkedAt: '2026-10-25T12:00:00Z',
     result: {
       ok: true,
       status: {
@@ -337,10 +339,35 @@ describe('page connection checks', () => {
     expect(renderWithCheck(linked(6, { kind: 'linked' }), readyCheck)).not.toContain('Page connection active');
   });
 
+  it('discards diagnostics from another link revision', () => {
+    expect(renderWithCheck(linked(5, { kind: 'linked' }), { ...readyCheck, linkRevision: 0 })).not.toContain('Page connection active');
+  });
+
+  it('hides diagnostics in production', () => {
+    vi.stubEnv('DEV', false);
+    try {
+      const html = renderWithCheck(linked(5, { kind: 'linked' }), readyCheck);
+      expect(html).not.toContain('Check page connection');
+      expect(html).not.toContain('Page connection active');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('shows identity evidence and unavailable exchange capabilities', () => {
+    const html = renderWithCheck(linked(5, { kind: 'linked' }), readyCheck);
+    expect(html).toContain('Exact origin verified: https://chatgpt.com');
+    expect(html).toContain('Background messaging: confirmed');
+    expect(html).toContain('Document instance: p');
+    expect(html).toContain('Automated submission and reply acquisition are unavailable');
+  });
+
   it('never presents a timeout as a failure on the page', () => {
     const html = renderWithCheck(linked(5, { kind: 'linked' }), {
       provider: 'chatgpt',
       tabId: 5,
+      linkRevision: 1,
+      checkedAt: '2026-10-25T12:00:00Z',
       result: { ok: false, failure: { kind: 'timeout', outcome: 'unknown' } },
     });
     expect(html).toContain('The page did not answer in time. This does not mean that anything failed on the page.');
@@ -350,6 +377,8 @@ describe('page connection checks', () => {
     const html = renderWithCheck(linked(5, { kind: 'linked' }), {
       provider: 'chatgpt',
       tabId: 5,
+      linkRevision: 1,
+      checkedAt: '2026-10-25T12:00:00Z',
       result: { ok: false, failure: { kind: 'content-script-unavailable', outcome: 'not-performed' } },
     });
     expect(html).toContain('page connection is not active in this tab. Reload the ChatGPT tab');

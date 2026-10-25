@@ -41,6 +41,9 @@ describe('checkpointed debate setup', () => {
 
   it.each<[unknown]>([
     [null],
+    // Removed API checkpoints must never be restored as browser or simulation sessions.
+    [{ mode: 'api', debateId: 'old', maximumCalls: 8, outputTokens: 512, debateOutputTokens: 4096 }],
+    [{ mode: 'api', scenario: 'full-debate', pace: 'slow' }],
     [{ mode: 'live' }],
     [{ mode: 'live', targets: { chatgpt: targets.chatgpt } }],
     [{ mode: 'live', targets: { ...targets, claude: { ...targets.claude, provider: 'chatgpt' } } }],

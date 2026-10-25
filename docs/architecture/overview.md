@@ -1,6 +1,10 @@
 # Architecture overview
 
-ThirdMind is a single Chrome extension. Inside it, the code is a **modular monolith**: one build and one deployable, split into modules with explicit boundaries. The debate logic is a **pure functional core** surrounded by a thin imperative shell. External capabilities sit behind **ports** in the lightweight hexagonal style.
+ThirdMind is a free, open-source, browser-first Chrome extension intended to orchestrate debates between existing or empty ChatGPT and Claude browser conversations. It requires no API keys, local provider bridge, paid APIs, or hosted backend. The two execution modes are **Simulation** and **Browser Conversations** (internal mode `live`). Browser Conversations currently supports linking, identity tracking, and page diagnostics; autonomous submission and reply acquisition remain unavailable and preflight blocks execution.
+
+The code is a **modular monolith**: one build and one deployable, split into modules with explicit boundaries. The debate logic is a **pure functional core** surrounded by a thin imperative shell. External capabilities sit behind **ports** in the lightweight hexagonal style. The shared runner, checkpoints, uncertain outcomes, operation correlation, durable claims, and duplicate protection serve browser execution and controlled tests without a provider backend.
+
+The [browser exchange fixture](browser-message-exchange-fixture.md) is a controlled local browser test using real Chrome messaging and synthetic pages, not live provider integration. Its harness and durable operation journal remain independent of production consumer-site capabilities.
 
 The reasoning behind this structure is recorded in [ADR 0001](../adr/0001-modular-monolith-functional-core.md).
 

@@ -9,8 +9,8 @@ const ROLE_DESCRIPTIONS: Readonly<Record<Participant['providerType'], string>> =
   human: 'Sets the question and constraints; can pause and intervene',
   'gpt-simulator': 'Deterministic stand-in for GPT. Not connected to ChatGPT',
   'claude-simulator': 'Deterministic stand-in for Claude. Not connected to Claude',
-  'chatgpt-live': 'The linked ChatGPT conversation, through the ChatGPT live adapter',
-  'claude-live': 'The linked Claude conversation, through the Claude live adapter',
+  'chatgpt-live': 'Linked ChatGPT conversation; automated submission and reply acquisition unavailable',
+  'claude-live': 'Linked Claude conversation; automated submission and reply acquisition unavailable',
 };
 
 function originBadge(providerType: Participant['providerType']): string | null {
@@ -22,7 +22,7 @@ function originBadge(providerType: Participant['providerType']): string | null {
       return 'Simulated';
     case 'chatgpt-live':
     case 'claude-live':
-      return 'Live';
+      return 'Browser';
   }
 }
 

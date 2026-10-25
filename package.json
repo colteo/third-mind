@@ -2,7 +2,7 @@
   "name": "thirdmind",
   "version": "0.1.0",
   "private": true,
-  "description": "Browser extension that coordinates structured, multi-round debate between a human, ChatGPT and Claude. Phase 2.2B foundation: simulated debates, linking of existing conversations and new chats by tab, and a readiness-only provider page transport.",
+  "description": "Browser-first debate orchestration for existing and empty ChatGPT and Claude conversations, with deterministic local simulation.",
   "type": "module",
   "engines": {
     "node": ">=22.12.0"

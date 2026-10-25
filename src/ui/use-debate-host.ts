@@ -59,7 +59,10 @@ export function useDebateHost(): DebateHost {
             break;
         }
       },
-      onStatusChange: setConnection,
+      onStatusChange: (status) => {
+        setConnection(status);
+        if (status !== 'connected') setPageChecks({});
+      },
     });
     connectionRef.current = hostConnection;
     return () => {

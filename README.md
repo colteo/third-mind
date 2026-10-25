@@ -2,9 +2,11 @@
 
 ThirdMind is a free, open-source Chrome extension for **collaborative reasoning between a human, ChatGPT and Claude**. It does not simply show two chatbot answers side by side. It runs a **structured, multi-round debate**: the human sets the question and constraints, and the debate engine coordinates independent analysis, cross-examination, refinement and convergence.
 
-> **Status: Phase 2.2B foundation (provider page transport).** Debates still run in **simulation mode only**: every participant response is produced by a deterministic local simulator and is labelled as simulated. In addition, the side panel can **link** one ChatGPT tab and one Claude tab, each showing either an existing conversation or a new, empty chat. A linked new chat is recorded as *pending* until the provider gives it a conversation address. Small content scripts on `chatgpt.com` and `claude.ai` let the background service **check whether a linked page is ready** (page kind, loading state, visibility, presence of the message box). ThirdMind does **not** read conversation contents, send messages or automate either website, and the simulated debate does not use linked conversations. **Live AI message exchange is not implemented and has not been tested against the real websites.**
+> **Status: browser-first foundation.** Choose **Simulation** for deterministic local debates or **Browser Conversations** to link existing and empty ChatGPT and Claude chats. Autonomous submission and reply acquisition on consumer websites are unavailable; readiness reports these missing capabilities and prevents a browser debate from starting.
 
-> **Live debate foundation.** The side panel now offers **Simulation** and **Live** modes. Live mode runs a preflight that checks each linked conversation or new chat, page connection, message submission, response acquisition and authorization, and explains every missing capability. **Start Live Debate** is shown only when every capability is available. The adapters that ship for the ChatGPT and Claude websites declare that no authorized automation route exists, so **a live debate cannot start in this build**. Being able to reach a page does not mean ThirdMind may automate it. See [docs/architecture/live-execution.md](docs/architecture/live-execution.md).
+The intended product orchestrates debates between the user's existing browser conversations, including new empty chats. No API keys, local provider bridge, paid APIs, or hosted backend are required.
+
+The [controlled browser exchange fixture](docs/architecture/browser-message-exchange-fixture.md) exercises real Chrome messaging against synthetic local pages. Its Chromium 155 report has 12 passing checks; it does not demonstrate live ChatGPT or Claude integration. [Browser integration validation](docs/architecture/browser-integration-validation.md) records the separate read-only provider diagnostics.
 
 ## What is implemented
 
@@ -52,7 +54,7 @@ ThirdMind is a free, open-source Chrome extension for **collaborative reasoning 
 ## What is simulated
 
 - **GPT Simulator** and **Claude Simulator** are scripted stand-ins with different viewpoints: one incremental and evidence-first, one risk-focused. They are *not* GPT or Claude. Their output is generic test data that references the topic and constraints.
-- The structured assessments that drive early stopping are scripted. No semantic judgement or reasoning-quality score is involved.
+- In Simulation, the structured assessments that drive early stopping are scripted. No semantic judgement or reasoning-quality score is involved.
 - Three scenarios are available: **Full debate**, **Early convergence** and **Provider failure**.
 
 ## Supported conversation URLs
@@ -81,18 +83,18 @@ The `tabs` permission is sensitive. Chrome shows it as *"Read your browsing hist
 | `chatgpt.js`    | `https://chatgpt.com/*`  | top only  | isolated | its own URL, `readyState`, `visibilityState`, whether `#prompt-textarea` exists |
 | `claude.js`     | `https://claude.ai/*`    | top only  | isolated | its own URL, `readyState`, `visibilityState`, whether the message box element exists |
 
-No `permissions` entry was added, and there are **no** `host_permissions`, `scripting`, `webNavigation`, `webRequest` or `cookies`. Because content scripts run on those two sites, Chrome shows an additional warning such as *"Read and change your data on chatgpt.com and claude.ai"*, and an already installed copy is disabled until the new warning is accepted. The scripts never read conversation text, titles or other page content, never type, click or submit, and never make network requests. The security boundary is described in [ADR 0004](docs/adr/0004-provider-content-script-boundary.md).
+No `scripting`, `webNavigation`, `webRequest` or `cookies` permissions are requested. Because content scripts run on those two sites, Chrome shows an additional warning such as *"Read and change your data on chatgpt.com and claude.ai"*, and an already installed copy is disabled until the new warning is accepted. The scripts never read conversation text, titles or other page content, never type, click or submit, and never make network requests. The security boundary is described in [ADR 0004](docs/adr/0004-provider-content-script-boundary.md).
 
 ## What is not implemented yet
 
-- Any message exchange with ChatGPT or Claude: no conversation reading, no prompt submission, no automation. The content scripts only report page readiness. Linked conversations and new chats are associations only. Reading replies and submitting prompts are the next steps (see [provider-transport.md](docs/architecture/provider-transport.md#next-steps-toward-message-exchange)).
-- Verification of the provider transport against the real websites by automated tests. The message box selectors are based on manual inspection and are unverified.
+- Automated message exchange with the ChatGPT or Claude websites: no conversation reading, no prompt submission, no website automation. The content scripts only report page readiness. Linked conversations and new chats are associations only. Reading replies and submitting prompts are the next steps (see [provider-transport.md](docs/architecture/provider-transport.md#next-steps-toward-message-exchange)).
+- Verification of the provider transport against the real websites by automated tests. Read-only diagnostics have verified composer detection manually; this does not establish submission or reply acquisition.
 - Injecting the content scripts into provider tabs that were open before ThirdMind was installed, updated or reloaded. Those tabs must be reloaded.
 - Telling the first message of a new chat apart from sidebar navigation. Tab URLs cannot distinguish them; see [ADR 0003](docs/adr/0003-pending-conversation-identity.md#consequences).
-- Using linked conversations in a debate. The debate still uses the simulators.
+- Autonomous debate using linked website conversations. Preflight blocks execution until submission, reply acquisition, and an authorized supported route are available.
 - Persistent history of past debates. The checkpoint is in memory only and is discarded when the browser exits.
 - Links that survive an extension reload or a browser restart (`storage.session` is cleared in both cases).
-- End-to-end browser tests (deferred to Phase 2, see [docs/architecture/testing.md](docs/architecture/testing.md)).
+- End-to-end consumer-site debate tests. The existing [controlled browser fixture](docs/architecture/browser-message-exchange-fixture.md) uses synthetic local pages.
 - Extension icons, localization and a published Chrome Web Store listing.
 - A license. One has not been selected yet.
 

@@ -1,3 +1,4 @@
+import { isSidePanelSender } from './side-panel-sender';
 import { browser, type Browser } from 'wxt/browser';
 import {
   LIVE_PARTICIPANTS,
@@ -166,7 +167,7 @@ export function startBackgroundHost(): void {
   });
 
   browser.runtime.onConnect.addListener((port) => {
-    if (port.name !== SIDE_PANEL_PORT_NAME || port.sender?.id !== browser.runtime.id) {
+    if (port.name !== SIDE_PANEL_PORT_NAME || !isSidePanelSender(port.sender, browser.runtime.id, browser.runtime.getURL('/sidepanel.html'))) {
       port.disconnect();
       return;
     }
@@ -213,7 +214,7 @@ type DebateClientMessage = Exclude<ClientMessage, ConnectionClientMessage | Page
  * transport validates it again before and after its request. The result is
  * diagnostic only: it never changes the link or the debate.
  */
-async function handlePageCheck(
+export async function handlePageCheck(
   connections: ConnectionCoordinator,
   transport: ProviderTransport,
   ports: ReadonlySet<Port>,
@@ -221,8 +222,13 @@ async function handlePageCheck(
   message: PageCheckClientMessage,
 ): Promise<void> {
   try {
+    if (!import.meta.env.DEV) {
+      post(port, { type: 'command-rejected', command: message.type, reason: 'Browser diagnostics are available only in a development build.' });
+      return;
+    }
     await connections.refresh();
-    const link = connections.getSnapshot().registry[message.provider].link;
+    const slot = connections.getSnapshot().registry[message.provider];
+    const link = slot.link;
     if (link?.state.kind !== 'linked') {
       post(port, {
         type: 'command-rejected',
@@ -233,7 +239,13 @@ async function handlePageCheck(
       return;
     }
     const result = await transport.probe(link.tabId, message.provider);
-    const reply: HostMessage = { type: 'page-check', check: { provider: message.provider, tabId: link.tabId, result } };
+    await connections.refresh();
+    const current = connections.getSnapshot().registry[message.provider];
+    if (current.revision !== slot.revision || current.link?.state.kind !== 'linked' || current.link.tabId !== link.tabId) {
+      post(port, { type: 'command-rejected', command: message.type, reason: 'The approved link changed during the diagnostic. Run it again.' });
+      return;
+    }
+    const reply: HostMessage = { type: 'page-check', check: { provider: message.provider, tabId: link.tabId, linkRevision: slot.revision, checkedAt: new Date().toISOString(), result } };
     for (const target of ports) {
       post(target, reply);
     }

@@ -51,7 +51,7 @@ export function DebateControls(props: DebateControlsProps) {
       )}
       {status.kind === 'pausing' && (
         <p className="hint">
-          Pausing. No new requests are sent; waiting for in-flight {mode === 'live' ? '' : 'simulated '}responses to
+          Pausing. No new requests are sent; waiting for in-flight {mode !== 'simulation' ? '' : 'simulated '}responses to
           arrive.
         </p>
       )}

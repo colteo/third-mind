@@ -132,6 +132,8 @@ export function isConnectionMessage(message: ClientMessage): message is Connecti
 
 /** The result of a page check, for the tab that was linked when the check ran. */
 export interface PageCheckView {
+  readonly linkRevision: number;
+  readonly checkedAt: string;
   readonly provider: ConversationProviderId;
   readonly tabId: number;
   readonly result: ProviderProbeResult;
@@ -295,7 +297,8 @@ export function parseHostMessage(value: unknown): HostMessage | null {
     return value as unknown as HostMessage;
   }
   const { check } = value;
-  if (value.type === 'page-check' && isRecord(check) && isRecord(check.result)) {
+  if (value.type === 'page-check' && isRecord(check) && isConversationProviderId(check.provider) &&
+    isTabId(check.tabId) && isRevision(check.linkRevision) && typeof check.checkedAt === 'string' && isRecord(check.result)) {
     return value as unknown as HostMessage;
   }
   if (value.type === 'command-rejected' && typeof value.reason === 'string') {

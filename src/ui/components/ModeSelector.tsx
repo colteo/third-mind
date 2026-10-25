@@ -14,8 +14,8 @@ const MODES: readonly { readonly id: ExecutionMode; readonly label: string; read
   },
   {
     id: 'live',
-    label: 'Live',
-    description: 'The linked ChatGPT and Claude conversations. Starts only when every required capability is available.',
+    label: 'Browser Conversations',
+    description: 'Linked website conversations. Automated execution is currently unavailable.',
   },
 ];
 

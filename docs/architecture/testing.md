@@ -124,6 +124,17 @@ npm run test:coverage
 
 This writes a text summary to the console and an HTML report to `coverage/index.html`, using the V8 provider. Coverage covers `domain`, `application`, `infrastructure`, `extension/protocol.ts`, `extension/chrome-tabs.ts`, `extension/session-connection-store.ts`, `extension/provider-transport.ts`, `extension/provider-transport-protocol.ts` and `extension/provider-content-script.ts` (whose live entry point, `startProviderContentScript`, is not exercised). No coverage figures are recorded in this repository. They have to be produced by running the command.
 
-## Deferred: end-to-end browser tests
+## Controlled browser exchange
 
-End-to-end tests (for example, Playwright loading the unpacked extension and driving the side panel) are **deferred to Phase 2**. Testing a side panel and service worker restarts in real Chrome needs a persistent-context browser setup and an extension-aware harness. That would roughly double the tooling in this first phase. Until then, the UI and Chrome adapters are verified manually with the steps in the README.
+The [browser exchange fixture](browser-message-exchange-fixture.md) uses actual Chrome tab/document messaging, an isolated content script, and synthetic local pages. It preserves operation correlation, durable claims, duplicate protection, uncertain outcomes, and first-message identity integration checks. The existing Chromium 155 report records 12 passing assertions. It is not live ChatGPT or Claude integration. Consumer-site diagnostics remain covered separately by [browser integration validation](browser-integration-validation.md).
+
+Run existing local tools directly without installing dependencies:
+
+```powershell
+node node_modules/typescript/bin/tsc --noEmit
+node node_modules/eslint/bin/eslint.js .
+node node_modules/vitest/vitest.mjs run --coverage
+node node_modules/wxt/bin/wxt.mjs build
+```
+
+Fixture launch instructions and Chromium requirements are documented in the fixture guide. No browser authorization flags are changed by consolidation.

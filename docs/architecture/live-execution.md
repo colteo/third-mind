@@ -1,3 +1,5 @@
+Browser Conversations is the browser-first execution route (internal mode `live`). It uses linked existing or empty ChatGPT and Claude chats, without API keys or a provider backend. Automated submission and reply acquisition on consumer websites remain unavailable; preflight reports the missing capabilities and blocks starting or continuing a browser debate. Simulation is a separate explicit mode.
+
 # Live debate execution (foundation)
 
 ## Execution modes

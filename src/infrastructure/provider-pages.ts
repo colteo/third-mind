@@ -24,12 +24,24 @@ export interface ProviderPageRule {
    * pages and are **unverified**: no automated test runs against the real
    * websites. A selector that no longer matches makes chat pages report
    * `composer-missing`; it never makes a page look ready.
+   * A match proves only element presence, not visibility, enabled state,
+   * authentication, or that message submission is available.
    */
   readonly composerSelectors: readonly string[];
 }
 
 export const PROVIDER_PAGE_RULES: readonly ProviderPageRule[] = [
-  { provider: 'chatgpt', composerSelectors: ['#prompt-textarea'] },
+  {
+    provider: 'chatgpt',
+    composerSelectors: [
+      'form[data-chatgpt-composer] [contenteditable="true"][role="textbox"]',
+      '#prompt-textarea',
+      // Scope semantic fallbacks to ChatGPT's composer, not arbitrary page editors.
+      'main form[data-type="unified-composer"] textarea[name="prompt-textarea"]',
+      'main form[data-type="unified-composer"] [role="textbox"][contenteditable="true"]',
+      'main form[data-type="unified-composer"] [data-lexical-editor="true"][contenteditable="true"]',
+    ],
+  },
   { provider: 'claude', composerSelectors: ['div.ProseMirror[contenteditable="true"]'] },
 ];
 

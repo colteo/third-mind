@@ -115,9 +115,7 @@ export function App() {
         <ConversationConnections view={host.connections} pageChecks={host.pageChecks} onCommand={send} />
       </main>
       <footer className="footer muted">
-        Preview. Simulated debates use local simulators. Live mode checks the linked conversations or new chats and the
-        installed provider adapters; the ChatGPT and Claude websites have no authorized automation route, so ThirdMind does not
-        read or send messages there and a live debate cannot start yet.
+        Simulation is free and local. Browser Conversations links existing and empty ChatGPT and Claude chats; automated submission and reply acquisition are unavailable.
       </footer>
     </div>
   );

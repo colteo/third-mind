@@ -253,7 +253,7 @@ function LinkedConversation({ view, link, label, canSelect, pageCheck, onCommand
   // The tab still shows what the link expects; the host rejects checks of any other link.
   const checkable = status.kind === 'linked' || status.kind === 'awaiting-identity' || status.kind === 'confirmation-required';
   // A check of a previously linked tab says nothing about the current one.
-  const check = checkable && pageCheck?.tabId === link.tabId ? pageCheck : null;
+  const check = checkable && pageCheck?.tabId === link.tabId && pageCheck.linkRevision === revision ? pageCheck : null;
 
   return (
     <div className="linked-conversation">
@@ -277,13 +277,23 @@ function LinkedConversation({ view, link, label, canSelect, pageCheck, onCommand
       <p className={`connection-detail connection-detail-${status.kind}`} role="status" aria-live="polite">
         {linkStatusDescription(status, identity)}
       </p>
-      {check !== null && (
+      {import.meta.env.DEV && check !== null && (
         <p
           className={`page-check page-check-${check.result.ok ? check.result.status.readiness : 'failed'}`}
           role="status"
           aria-live="polite"
         >
           {pageCheckDescription(check.result, label)}
+          <br />
+          Last checked: {check.checkedAt}. Approved tab: {check.tabId}; link revision: {check.linkRevision}.
+          {check.result.ok && (<>
+            <br />
+            Exact origin verified: {provider === 'chatgpt' ? 'https://chatgpt.com' : 'https://claude.ai'}.
+            Background messaging: confirmed. Document instance: {check.result.status.pageInstanceId}.
+            Document: {check.result.status.documentState}; composer: {check.result.status.composer}.
+          </>)}
+          <br />
+          Snapshot only; rerun after reload or navigation. Automated submission and reply acquisition are unavailable: no authorized browser route is configured.
         </p>
       )}
 
@@ -336,7 +346,7 @@ function LinkedConversation({ view, link, label, canSelect, pageCheck, onCommand
             Confirm this conversation
           </button>
         )}
-        {checkable && (
+        {import.meta.env.DEV && checkable && (
           <button
             type="button"
             className="button"
@@ -344,7 +354,7 @@ function LinkedConversation({ view, link, label, canSelect, pageCheck, onCommand
               onCommand({ type: 'check-provider-page', provider });
             }}
           >
-            Check page connection
+            Check page connection (developer diagnostic)
           </button>
         )}
         <button
