@@ -16,7 +16,9 @@ const SITES: Readonly<Record<ConversationProviderId, { readonly label: string; r
  * neither provider documents such a route for third-party extensions. This
  * adapter therefore declares the route `not-authorized`, reports submission
  * and response acquisition as unavailable, and refuses every operation
- * without touching the page. It exists so the live preflight can explain
+ * without touching the page. This applies equally to saved conversations and
+ * to linked new chats: a new chat is a valid live target, but this adapter
+ * cannot send it a first message. It exists so the live preflight can explain
  * precisely why a live debate cannot start.
  *
  * An authorized integration (see docs/architecture/live-execution.md) replaces

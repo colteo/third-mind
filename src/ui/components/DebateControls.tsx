@@ -69,8 +69,9 @@ export function DebateControls(props: DebateControlsProps) {
       )}
       {mode === 'live' && status.kind === 'paused' && (
         <p className="hint">
-          Before a live debate resumes or a request is sent again, ThirdMind checks that both linked conversations are
-          unchanged and every live capability is still available.
+          Before a live debate resumes or a request is sent again, ThirdMind checks that both participants are still
+          bound to the same conversation (or, before its first message, the same new chat), that no first message is
+          waiting to be matched to a conversation, and that every live capability is still available.
         </p>
       )}
       {status.kind === 'paused' && actions.addConstraint && (

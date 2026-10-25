@@ -255,13 +255,32 @@ export interface LiveAdapterCapabilities {
   readonly responseAcquisition: AdapterCapability;
 }
 
-/** The verified conversation a live operation is aimed at. */
-export interface LiveConversationTarget {
+/**
+ * The verified target a live operation is aimed at. Either:
+ * - `conversation`: a saved conversation with a known persistent identifier;
+ * - `new-chat`: a linked new chat before its first message. It has no
+ *   conversation identifier yet and none is invented: the provider assigns one
+ *   when the first message is saved (see docs/architecture/live-execution.md).
+ *
+ * Both carry the content script instance that answered the latest probe. It
+ * changes with every document load, so it identifies the approved document.
+ */
+export type LiveConversationTarget = LiveSavedConversationTarget | LiveNewChatTarget;
+
+export interface LiveSavedConversationTarget {
+  readonly kind: 'conversation';
   readonly provider: ConversationProviderId;
   readonly tabId: BrowserTabId;
-  /** Always a saved conversation: live operations are never aimed at a pending new chat. */
   readonly conversationId: string;
-  /** Content script instance that answered the latest probe. It changes with every document load. */
+  readonly pageInstanceId: string;
+}
+
+export interface LiveNewChatTarget {
+  readonly kind: 'new-chat';
+  readonly provider: ConversationProviderId;
+  readonly tabId: BrowserTabId;
+  /** Exact provider origin the new chat was approved on. */
+  readonly origin: string;
   readonly pageInstanceId: string;
 }
 
@@ -271,10 +290,17 @@ export interface LiveSubmission {
   readonly text: string;
 }
 
-/** Proof that the adapter handed a message to the provider. */
-export interface SubmissionReceipt {
+/**
+ * Proof that the adapter handed a message to the provider. `kind` matches the
+ * target it was submitted to: the first message of a new chat has no
+ * conversation identifier at submission time.
+ */
+export type SubmissionReceipt =
+  | (SubmissionReceiptBase & { readonly kind: 'conversation'; readonly conversationId: string })
+  | (SubmissionReceiptBase & { readonly kind: 'new-chat' });
+
+interface SubmissionReceiptBase {
   readonly operationId: OperationId;
-  readonly conversationId: string;
   readonly pageInstanceId: string;
   /** Adapter-specific identifier of the submitted message. */
   readonly submissionId: string;
@@ -282,6 +308,12 @@ export interface SubmissionReceipt {
 
 export interface LiveResponse {
   readonly operationId: OperationId;
+  /**
+   * The persistent conversation the response belongs to, as reported by the
+   * adapter's route. For the first message of a new chat this is the
+   * identifier the provider assigned; ThirdMind binds it only if the linked
+   * tab, on the same document, shows the same conversation.
+   */
   readonly conversationId: string;
   readonly pageInstanceId: string;
   readonly submissionId: string;
@@ -331,6 +363,13 @@ export interface LiveCallOptions {
  * conversation and acquiring the provider's response. Implementations keep
  * browser and network details behind this port, must not throw, and must
  * only implement routes the provider has authorized for automated use.
+ *
+ * For a `new-chat` target an adapter that reports submission as available
+ * must: submit the first message once to the approved document; return a
+ * `new-chat` receipt; and report, in the response, the persistent
+ * conversation identifier the provider assigned. It must never guess an
+ * identifier. An adapter that cannot do this reports submission as
+ * unavailable for `new-chat` targets.
  */
 export interface LiveProviderAdapter {
   readonly provider: ConversationProviderId;
@@ -348,3 +387,15 @@ export interface LiveProviderAdapter {
 }
 
 export type LiveAdapterRegistry = Readonly<Partial<Record<ConversationProviderId, LiveProviderAdapter>>>;
+
+/**
+ * Durable record of where each live participant of the current session is
+ * bound: in particular, the write-ahead record of a new chat's first message
+ * and the conversation identity bound from it. It must survive service worker
+ * restarts like the debate checkpoint. `load` returns `null` when nothing (or
+ * nothing valid) is stored.
+ */
+export interface LiveTargetStore<TRecord> {
+  load(): Promise<TRecord | null>;
+  save(record: TRecord): Promise<void>;
+}

@@ -1,5 +1,4 @@
 import {
-  CONVERSATION_PROVIDERS,
   HUMAN_PARTICIPANT,
   isConversationId,
   isConversationProviderId,
@@ -30,15 +29,47 @@ export function isExecutionMode(value: unknown): value is ExecutionMode {
 }
 
 /**
- * The conversation a live participant was bound to when the debate started.
- * Every live operation re-verifies that the link still points at exactly this
- * tab and conversation. Contains no URLs, titles or content.
+ * What a live participant is bound to. Contains no URLs, titles or content.
+ *
+ * - `conversation`: a saved conversation with a known persistent identifier;
+ * - `new-chat`: an explicitly linked new chat before its first message, bound
+ *   to its provider, its user-approved tab, its exact origin and the document
+ *   (page instance) observed by the preflight. It has no conversation
+ *   identifier: the provider assigns one when the first message is saved, and
+ *   ThirdMind then binds it (see `live-target.ts`). None is ever invented.
+ *
+ * Every live operation re-verifies that the link and the page still match the binding.
  */
-export interface LiveTargetBinding {
+export type LiveTargetBinding = SavedConversationBinding | NewChatBinding;
+
+/**
+ * How a saved conversation became the target:
+ * - `linked`: it was the linked saved conversation when the debate started;
+ * - `first-message`: it was created by the debate's first message to a linked
+ *   new chat, and the adapter's report and the page agreed on it;
+ * - `recovered`: the human bound it explicitly after the first message's
+ *   identity could not be established.
+ */
+export type BindingSource = 'linked' | 'first-message' | 'recovered';
+
+export interface SavedConversationBinding {
+  readonly kind: 'conversation';
   readonly provider: ConversationProviderId;
   readonly tabId: BrowserTabId;
   readonly conversationId: string;
-  /** Link slot revision at preflight time. */
+  /** Link slot revision when the binding was made. */
+  readonly linkRevision: number;
+  readonly source: BindingSource;
+}
+
+export interface NewChatBinding {
+  readonly kind: 'new-chat';
+  readonly provider: ConversationProviderId;
+  readonly tabId: BrowserTabId;
+  /** Exact provider origin the new chat was approved on. */
+  readonly origin: string;
+  /** Document observed by the preflight. A reload or a replaced document is a different target. */
+  readonly pageInstanceId: string;
   readonly linkRevision: number;
 }
 
@@ -62,22 +93,57 @@ export const LIVE_PARTICIPANTS: readonly Participant[] = [
   { id: LIVE_PARTICIPANT_PROVIDERS.claude, displayName: 'Claude', providerType: 'claude-live' },
 ];
 
-export function isLiveDebateSetup(value: unknown): value is LiveDebateSetup {
+/**
+ * Reads a checkpointed live setup. Bindings written before new chats could be
+ * live targets have no `kind`; they are read as saved conversations linked at
+ * the start. Anything malformed is rejected.
+ */
+export function parseLiveDebateSetup(value: unknown): LiveDebateSetup | null {
   if (!isRecord(value) || value.mode !== 'live' || !isRecord(value.targets)) {
-    return false;
+    return null;
   }
-  const { targets } = value;
-  return CONVERSATION_PROVIDERS.every((provider) => {
-    const target = targets[provider];
-    return (
-      isRecord(target) &&
-      isConversationProviderId(target.provider) &&
-      target.provider === provider &&
-      isTabId(target.tabId) &&
-      isConversationId(target.conversationId) &&
-      isRevision(target.linkRevision)
-    );
-  });
+  const chatgpt = parseLiveTargetBinding(value.targets.chatgpt, 'chatgpt');
+  const claude = parseLiveTargetBinding(value.targets.claude, 'claude');
+  return chatgpt === null || claude === null ? null : { mode: 'live', targets: { chatgpt, claude } };
+}
+
+export function isLiveDebateSetup(value: unknown): value is LiveDebateSetup {
+  return parseLiveDebateSetup(value) !== null;
+}
+
+/** Strict structural check of one binding. Returns a clean copy, or `null`. */
+export function parseLiveTargetBinding(value: unknown, provider: ConversationProviderId): LiveTargetBinding | null {
+  if (
+    !isRecord(value) ||
+    !isConversationProviderId(value.provider) ||
+    value.provider !== provider ||
+    !isTabId(value.tabId) ||
+    !isRevision(value.linkRevision)
+  ) {
+    return null;
+  }
+  const { tabId, linkRevision } = value;
+  const kind = value.kind ?? 'conversation';
+  if (kind === 'conversation') {
+    const source = value.source ?? 'linked';
+    return isConversationId(value.conversationId) && isBindingSource(source)
+      ? { kind, provider, tabId, conversationId: value.conversationId, linkRevision, source }
+      : null;
+  }
+  if (kind === 'new-chat') {
+    return isNonEmptyString(value.origin) && isNonEmptyString(value.pageInstanceId)
+      ? { kind, provider, tabId, origin: value.origin, pageInstanceId: value.pageInstanceId, linkRevision }
+      : null;
+  }
+  return null;
+}
+
+function isBindingSource(value: unknown): value is BindingSource {
+  return value === 'linked' || value === 'first-message' || value === 'recovered';
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 256;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

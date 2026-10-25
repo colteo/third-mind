@@ -1,16 +1,20 @@
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import type { LivePreflightResult, ProviderCapabilities, ProviderPreflight } from '../../application';
+import type { LivePreflightResult, PreflightTarget, ProviderCapabilities, ProviderPreflight } from '../../application';
 import type { ConversationProviderId } from '../../domain';
 import { Header } from './Header';
-import { LiveDebateSetup, liveStartState } from './LiveDebateSetup';
+import { LiveDebateSetup, liveStartState, targetDescription } from './LiveDebateSetup';
 
 /** Static render tests (no DOM), like Results.test.ts. */
 
 const available = { status: 'available' } as const;
 
-function provider(id: ConversationProviderId, capabilities: Partial<ProviderCapabilities> = {}): ProviderPreflight {
+function provider(
+  id: ConversationProviderId,
+  capabilities: Partial<ProviderCapabilities> = {},
+  target: PreflightTarget | null = { kind: 'conversation', conversationId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' },
+): ProviderPreflight {
   const all: ProviderCapabilities = {
     connection: available,
     transport: available,
@@ -27,6 +31,7 @@ function provider(id: ConversationProviderId, capabilities: Partial<ProviderCapa
     technicallyReady: issues.every((issue) => issue.capability === 'authorization'),
     authorized: all.authorization.status === 'available',
     ready: issues.length === 0,
+    target,
     binding: null,
     issues,
   };
@@ -88,6 +93,47 @@ describe('live debate setup', () => {
     const stale = render(ready, { chatgpt: 2, claude: 1 });
     expect(stale).not.toContain('Start Live Debate');
     expect(text(stale)).toContain('Checking live readiness');
+  });
+
+  it('shows new-chat readiness distinctly from saved-conversation readiness', () => {
+    const html = render(result([provider('chatgpt', {}, { kind: 'new-chat' }), provider('claude')]));
+    expect(html).toContain('Start Live Debate');
+    const plain = text(html);
+    expect(plain).toContain('ChatGPT Ready: new chat');
+    expect(plain).toContain('Claude Ready: saved conversation');
+    expect(plain).toContain('Target: new chat (the debate');
+    expect(plain).toContain('Target: saved conversation aaaaaaaa…');
+    // No instruction to link a saved conversation first.
+    expect(plain).not.toMatch(/must link a saved conversation/i);
+    expect(plain).toContain('Each target can be a saved conversation or a new chat');
+  });
+
+  it('keeps honest capability failures for a new chat', () => {
+    const blockedNewChat = provider(
+      'claude',
+      {
+        responseAcquisition: {
+          status: 'unavailable',
+          issue: { provider: 'claude', capability: 'responseAcquisition', code: 'response-unavailable', message: 'Responses cannot be read.' },
+        },
+        authorization: {
+          status: 'unavailable',
+          issue: { provider: 'claude', capability: 'authorization', code: 'automation-not-authorized', message: 'No authorized route.' },
+        },
+      },
+      { kind: 'new-chat' },
+    );
+    const plain = text(render(result([provider('chatgpt'), blockedNewChat])));
+    expect(plain).toContain('Claude Not ready');
+    expect(plain).toContain('Claude, response acquisition: Responses cannot be read.');
+    expect(plain).toContain('Claude, authorized automation route: No authorized route.');
+    expect(plain).not.toContain('Start Live Debate');
+  });
+
+  it('describes targets', () => {
+    expect(targetDescription(null)).toBe('none available');
+    expect(targetDescription({ kind: 'new-chat' })).toMatch(/^new chat/);
+    expect(targetDescription({ kind: 'conversation', conversationId: 'abc' })).toBe('saved conversation abc');
   });
 
   it('derives the start state', () => {

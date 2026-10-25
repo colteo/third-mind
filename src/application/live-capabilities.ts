@@ -3,7 +3,9 @@ import type { ConversationProviderId } from '../domain';
 /**
  * Capabilities a provider needs before it can take part in a live debate.
  *
- * - `connection`: a linked saved conversation whose tab still shows it;
+ * - `connection`: a linked target whose tab still shows it: a saved
+ *   conversation, or a new chat before its first message (the provider
+ *   assigns the conversation identifier when that message is saved);
  * - `transport`: the provider page answers through ThirdMind's page transport
  *   and reports a loaded chat page with a message box;
  * - `submission`: the adapter can submit a debate message to that conversation;
@@ -40,8 +42,9 @@ export type PreflightIssueCode =
   // connection
   | 'not-linked'
   | 'view-outdated'
-  | 'identity-pending'
   | 'identity-unconfirmed'
+  /** A new chat's first message may have been sent, but its conversation could not be established. */
+  | 'identity-unresolved'
   | 'link-stale'
   | 'link-disconnected'
   | 'link-unavailable'

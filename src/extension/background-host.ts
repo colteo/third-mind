@@ -6,6 +6,7 @@ import {
   createDebateRunner,
   createLivePreflight,
   createLiveProviders,
+  createLiveTargetTracker,
   createSubmissionLocks,
   prepareLiveStart,
   verifyLiveContinuation,
@@ -13,6 +14,7 @@ import {
   type DebateRunner,
   type LivePreflight,
   type LivePreflightResult,
+  type LiveTargetTracker,
   type RunnerResult,
 } from '../application';
 import { DEFAULT_CONFIGURATION } from '../domain';
@@ -35,8 +37,15 @@ import { createProviderTransport, type ProviderTransport } from './provider-tran
 import { randomIds, systemClock } from './runtime-adapters';
 import { createSessionCheckpointStore } from './session-checkpoint-store';
 import { createSessionConnectionStore } from './session-connection-store';
+import { createSessionLiveTargetStore } from './session-live-target-store';
 
 type Port = Browser.runtime.Port;
+
+/** What continuing a live session needs: the preflight and where each participant is bound now. */
+interface LiveContinuation {
+  readonly preflight: LivePreflight;
+  readonly targets: LiveTargetTracker;
+}
 
 /**
  * Composition root for the background service worker.
@@ -92,6 +101,9 @@ export function startBackgroundHost(): void {
   const liveAdapters = createConsumerSiteAdapters();
   const preflight = createLivePreflight({ connections, transport, adapters: liveAdapters, clock: systemClock });
   const submissionLocks = createSubmissionLocks();
+  // Where each live participant is bound, including the write-ahead record of a new chat's first message.
+  const liveTargets = createLiveTargetTracker(createSessionLiveTargetStore());
+  const continuation: LiveContinuation = { preflight, targets: liveTargets };
 
   const runner = createDebateRunner<DebateSetup>({
     clock: systemClock,
@@ -103,6 +115,8 @@ export function startBackgroundHost(): void {
         : createLiveProviders(setup, {
             adapters: liveAdapters,
             verifyTarget: (binding) => preflight.verifyTarget(binding),
+            observeNewChat: (binding) => preflight.observeNewChat(binding),
+            targets: liveTargets,
             locks: submissionLocks,
           }),
     reportError: (error) => {
@@ -172,7 +186,7 @@ export function startBackgroundHost(): void {
         // The coordinator queues commands behind its own initialization.
         void handleConnectionMessage(connections, port, message);
       } else {
-        void ready.then(() => handleMessage(runner, preflight, ports, port, message));
+        void ready.then(() => handleMessage(runner, continuation, ports, port, message));
       }
     });
     void ready.then(() => {
@@ -283,14 +297,14 @@ function broadcastReadiness(ports: ReadonlySet<Port>, readiness: LivePreflightRe
 
 async function handleMessage(
   runner: DebateRunner<DebateSetup>,
-  preflight: LivePreflight,
+  live: LiveContinuation,
   ports: ReadonlySet<Port>,
   port: Port,
   message: DebateClientMessage,
 ): Promise<void> {
   let result: RunnerResult;
   try {
-    result = await dispatch(runner, preflight, ports, message);
+    result = await dispatch(runner, live, ports, message);
   } catch (error) {
     console.error('[ThirdMind]', error);
     result = { ok: false, reason: 'An internal error occurred. See the service worker console for details.' };
@@ -304,7 +318,7 @@ async function handleMessage(
 
 async function dispatch(
   runner: DebateRunner<DebateSetup>,
-  preflight: LivePreflight,
+  live: LiveContinuation,
   ports: ReadonlySet<Port>,
   message: DebateClientMessage,
 ): Promise<RunnerResult> {
@@ -320,12 +334,12 @@ async function dispatch(
     case 'pause':
       return runner.pause(message.sessionId);
     case 'resume':
-      return (await liveContinuationBlocked(runner, preflight, ports, message.sessionId)) ?? runner.resume(message.sessionId);
+      return (await liveContinuationBlocked(runner, live, ports, message.sessionId)) ?? runner.resume(message.sessionId);
     case 'add-constraint':
       return runner.addConstraint(message.content, message.sessionId);
     case 'reissue-operation':
       return (
-        (await liveContinuationBlocked(runner, preflight, ports, message.sessionId)) ??
+        (await liveContinuationBlocked(runner, live, ports, message.sessionId)) ??
         runner.reissueUncertainOperation(message.operationId, message.sessionId)
       );
     case 'reset':
@@ -335,12 +349,13 @@ async function dispatch(
 
 /**
  * A live session sends messages again when it resumes or re-issues an uncertain operation, so both need a
- * fresh preflight against the conversations it was started with. Returns `null` when the action may proceed:
+ * fresh preflight against where its participants are bound now: the saved conversation, the conversation
+ * bound from a new chat's first message, or the approved new chat. An unresolved first message blocks both. Returns `null` when the action may proceed:
  * for every simulated session, and for a command aimed at another session (the runner rejects it itself).
  */
 async function liveContinuationBlocked(
   runner: DebateRunner<DebateSetup>,
-  preflight: LivePreflight,
+  live: LiveContinuation,
   ports: ReadonlySet<Port>,
   sessionId: string,
 ): Promise<RunnerResult | null> {
@@ -348,7 +363,7 @@ async function liveContinuationBlocked(
   if (setup?.mode !== 'live' || session?.id !== sessionId) {
     return null;
   }
-  const gate = await verifyLiveContinuation(preflight, setup);
+  const gate = await verifyLiveContinuation(live.preflight, live.targets, session.id, setup);
   broadcastReadiness(ports, gate.preflight);
   return gate.ok ? null : gate;
 }

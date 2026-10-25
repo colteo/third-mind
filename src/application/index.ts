@@ -43,10 +43,15 @@ export {
   LIVE_PARTICIPANT_PROVIDERS,
   isExecutionMode,
   isLiveDebateSetup,
+  parseLiveDebateSetup,
+  parseLiveTargetBinding,
+  type BindingSource,
   type ExecutionMode,
   type LiveDebateSetup,
   type LiveTargetBinding,
   type LiveTargetBindings,
+  type NewChatBinding,
+  type SavedConversationBinding,
 } from './execution-mode';
 export {
   CAPABILITY_NAMES,
@@ -64,12 +69,15 @@ export {
   createLivePreflight,
   describePreflightFailure,
   evaluateConnection,
+  observeNewChatTab,
   type ConnectionEvaluation,
+  type LinkedTarget,
   type LinkRevisions,
   type LivePreflight,
   type LivePreflightDependencies,
   type LivePreflightRequest,
   type LivePreflightResult,
+  type PreflightTarget,
   type ProviderPreflight,
   type TargetVerification,
 } from './live-preflight';
@@ -80,6 +88,7 @@ export {
   createSubmissionLocks,
   livePrompt,
   type LiveContributionProviderOptions,
+  type LiveTargetAccess,
   type LiveProvidersDependencies,
   type SubmissionLocks,
 } from './live-contribution-provider';
@@ -90,4 +99,26 @@ export {
   parseLiveResponse,
   type ParsedLiveResponse,
 } from './live-response';
-export { prepareLiveStart, verifyLiveContinuation, type LiveGateResult } from './live-debate';
+export {
+  prepareLiveStart,
+  resolveLiveFirstMessage,
+  verifyLiveContinuation,
+  type LiveGateResult,
+} from './live-debate';
+export {
+  bindingsOf,
+  createLiveTargetTracker,
+  initialTargetStates,
+  parseLiveTargetRecord,
+  reconcileFirstMessage,
+  resolveFirstMessageState,
+  type FirstMessageReconciliation,
+  type FirstMessageResolution,
+  type LiveTargetRecord,
+  type LiveTargetState,
+  type LiveTargetStates,
+  type LiveTargetTracker,
+  type NewChatObservation,
+  type SessionLiveTargets,
+  type TargetChange,
+} from './live-target';

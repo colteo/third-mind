@@ -32,7 +32,15 @@ export const CLAUDE_CONVERSATION = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 export const CHATGPT_TAB = 11;
 export const CLAUDE_TAB = 22;
 
-const ORIGINS: Readonly<Record<ConversationProviderId, string>> = {
+/** Conversations the fake providers create when a new chat receives its first message. */
+export const CREATED_CONVERSATIONS: Readonly<Record<ConversationProviderId, string>> = {
+  chatgpt: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+  claude: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+};
+
+export const TABS: Readonly<Record<ConversationProviderId, BrowserTabId>> = { chatgpt: CHATGPT_TAB, claude: CLAUDE_TAB };
+
+export const ORIGINS: Readonly<Record<ConversationProviderId, string>> = {
   chatgpt: 'https://chatgpt.com',
   claude: 'https://claude.ai',
 };
@@ -99,7 +107,28 @@ export function linkedConnections(): FakeConnections {
   return createFakeConnections().link('chatgpt').link('claude');
 }
 
-/** Page transport whose answer per tab can be changed between calls. */
+/** Both providers linked to new, empty chats (pending identity). */
+export function newChatConnections(): FakeConnections {
+  return createFakeConnections()
+    .link('chatgpt', { identity: { kind: 'pending' } })
+    .link('claude', { identity: { kind: 'pending' } });
+}
+
+/**
+ * What the connection coordinator records when the linked new chat's tab moves
+ * to a conversation: `saved` (continuity observed) or `unconfirmed`.
+ */
+export function newChatIdentity(
+  conversationId: string,
+  kind: 'saved' | 'unconfirmed' = 'saved',
+): ConversationIdentity {
+  const canonicalUrl = `https://example.invalid/${conversationId}`;
+  return kind === 'saved'
+    ? { kind, conversationId, canonicalUrl, source: 'new-chat' }
+    : { kind, conversationId, canonicalUrl, reason: 'observation-gap' };
+}
+
+/** Page transport whose answer per tab can be changed between calls. Starts with both saved conversations shown. */
 export function createFakeTransport() {
   const pages = new Map<BrowserTabId, ProviderProbeResult>();
   let probes = 0;
@@ -124,9 +153,27 @@ export function createFakeTransport() {
   pages.set(CHATGPT_TAB, ready(CHATGPT_TAB, 'chatgpt', CHATGPT_CONVERSATION, 'page-chatgpt-1'));
   pages.set(CLAUDE_TAB, ready(CLAUDE_TAB, 'claude', CLAUDE_CONVERSATION, 'page-claude-1'));
 
+  const newChat = (tabId: BrowserTabId, provider: ConversationProviderId, pageInstanceId: string): ProviderProbeResult => ({
+    ok: true,
+    status: {
+      provider,
+      page: { kind: 'new-chat' },
+      documentState: 'complete',
+      visibility: 'visible',
+      composer: 'present',
+      tabId,
+      pageInstanceId,
+      readiness: 'ready',
+    },
+  });
+
   const transport: ProviderPageTransport & {
     set(tabId: BrowserTabId, result: ProviderProbeResult): void;
     reload(tabId: BrowserTabId, provider: ConversationProviderId, conversationId: string, pageInstanceId: string): void;
+    /** A new-chat document in the tab. */
+    showNewChat(tabId: BrowserTabId, provider: ConversationProviderId, pageInstanceId: string): void;
+    /** Same-document navigation (as after a first message): the URL changes, the page instance does not. */
+    navigateWithinDocument(tabId: BrowserTabId, provider: ConversationProviderId, conversationId: string): void;
     readonly probeCount: number;
   } = {
     probe(tabId) {
@@ -139,6 +186,14 @@ export function createFakeTransport() {
       pages.set(tabId, result);
     },
     reload(tabId, provider, conversationId, pageInstanceId) {
+      pages.set(tabId, ready(tabId, provider, conversationId, pageInstanceId));
+    },
+    showNewChat(tabId, provider, pageInstanceId) {
+      pages.set(tabId, newChat(tabId, provider, pageInstanceId));
+    },
+    navigateWithinDocument(tabId, provider, conversationId) {
+      const current = pages.get(tabId);
+      const pageInstanceId = current?.ok === true ? current.status.pageInstanceId : 'unknown-page';
       pages.set(tabId, ready(tabId, provider, conversationId, pageInstanceId));
     },
     get probeCount() {
@@ -176,7 +231,11 @@ export type FakeBehavior =
 
 export interface FakeAdapterOptions {
   readonly authorization?: AutomationAuthorization;
-  readonly capabilities?: LiveAdapterCapabilities | (() => Promise<LiveAdapterCapabilities>);
+  readonly capabilities?:
+    | LiveAdapterCapabilities
+    | ((target: LiveConversationTarget) => Promise<LiveAdapterCapabilities>);
+  /** Conversation the fake provider reports for the first message of a new chat. */
+  readonly createdConversationId?: string;
   /** Decides the behaviour for each submission. Defaults to an answer that reports no material issues. */
   readonly behave?: (submission: LiveSubmission, index: number) => FakeBehavior;
   /** Called after a submission was accepted and before the response is produced. */
@@ -200,10 +259,10 @@ export function createFakeLiveAdapter(provider: ConversationProviderId, options:
     provider,
     route: { id: `fake-${provider}`, label: `Fake ${provider} route` },
     authorization: options.authorization ?? AUTHORIZED,
-    capabilities() {
+    capabilities(target) {
       capabilityQueries += 1;
       const { capabilities = ALL_CAPABILITIES } = options;
-      return typeof capabilities === 'function' ? capabilities() : Promise.resolve(capabilities);
+      return typeof capabilities === 'function' ? capabilities(target) : Promise.resolve(capabilities);
     },
     submit(target, submission): Promise<SubmissionResult> {
       const behaviour =
@@ -219,14 +278,13 @@ export function createFakeLiveAdapter(provider: ConversationProviderId, options:
       const submissionId = `submission-${provider}-${submissions.length}`;
       behaviours.set(submissionId, behaviour);
       options.onSubmitted?.(submission);
+      const base = { operationId: submission.operationId, pageInstanceId: target.pageInstanceId, submissionId };
       return Promise.resolve({
         ok: true,
-        receipt: {
-          operationId: submission.operationId,
-          conversationId: target.conversationId,
-          pageInstanceId: target.pageInstanceId,
-          submissionId,
-        },
+        receipt:
+          target.kind === 'conversation'
+            ? { ...base, kind: 'conversation', conversationId: target.conversationId }
+            : { ...base, kind: 'new-chat' },
       });
     },
     awaitResponse(_target, receipt: SubmissionReceipt, { signal }): Promise<ResponseResult> {
@@ -244,7 +302,16 @@ export function createFakeLiveAdapter(provider: ConversationProviderId, options:
       if ('submitFailure' in behaviour) {
         return Promise.resolve({ ok: false, failure: behaviour.submitFailure });
       }
-      const response = { ...receipt, content: 'answer' in behaviour ? behaviour.answer : `Late answer.\n${assessmentBlock()}` };
+      const response = {
+        operationId: receipt.operationId,
+        submissionId: receipt.submissionId,
+        pageInstanceId: receipt.pageInstanceId,
+        conversationId:
+          receipt.kind === 'conversation'
+            ? receipt.conversationId
+            : (options.createdConversationId ?? CREATED_CONVERSATIONS[provider]),
+        content: 'answer' in behaviour ? behaviour.answer : `Late answer.\n${assessmentBlock()}`,
+      };
       if ('mismatch' in behaviour) {
         switch (behaviour.mismatch) {
           case 'conversation':

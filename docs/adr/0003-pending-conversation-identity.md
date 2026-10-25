@@ -70,6 +70,9 @@ Forces:
 
 ## Follow-up for Phase 2.2B
 
+Superseded for live debates by [ADR 0005](0005-live-new-chat-lifecycle.md): a live first message is bound only through the correlation described there. The link model itself is unchanged.
+
+
 When ThirdMind itself sends the first message through a content script, it can arm an explicit expectation ("this tab is about to leave the new chat because ThirdMind sent a message") and require that expectation for automatic resolution. Without it, the transition should be treated as `unconfirmed`. The `IdentitySource` and `ConfirmationReason` unions are the extension points for that.
 
 ## Alternatives considered

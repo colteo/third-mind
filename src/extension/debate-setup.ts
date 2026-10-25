@@ -1,4 +1,4 @@
-import { isLiveDebateSetup, type LiveDebateSetup } from '../application';
+import { parseLiveDebateSetup, type LiveDebateSetup } from '../application';
 import { isSimulationSetup, type SimulationSetup } from '../infrastructure/simulator';
 
 /**
@@ -16,8 +16,9 @@ export type DebateSetup = SimulationDebateSetup | LiveDebateSetup;
  * Anything else, including a `mode` that is neither mode, is rejected.
  */
 export function parseDebateSetup(value: unknown): DebateSetup | null {
-  if (isLiveDebateSetup(value)) {
-    return { mode: 'live', targets: value.targets };
+  const live = parseLiveDebateSetup(value);
+  if (live !== null) {
+    return live;
   }
   if (!isSimulationSetup(value)) {
     return null;

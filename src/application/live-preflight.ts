@@ -1,6 +1,7 @@
 import {
   CONVERSATION_PROVIDERS,
   linkStatus,
+  type BrowserTabId,
   type ConnectionSlot,
   type ConversationProviderId,
   type Timestamp,
@@ -15,7 +16,7 @@ import type {
   ProviderProbeResult,
 } from '../ports';
 import type { ConnectionsSnapshot, TabDiscovery } from './connection-coordinator';
-import type { LiveTargetBinding, LiveTargetBindings } from './execution-mode';
+import type { BindingSource, LiveTargetBinding, NewChatBinding } from './execution-mode';
 import {
   AVAILABLE,
   isAuthorized,
@@ -28,6 +29,7 @@ import {
   type PreflightIssueCode,
   type ProviderCapabilities,
 } from './live-capabilities';
+import type { LiveTargetStates, NewChatObservation } from './live-target';
 
 export interface LivePreflightDependencies {
   /** The connection coordinator. Links are reconciled with a fresh tab scan before every check. */
@@ -45,9 +47,21 @@ export type LinkRevisions = Readonly<Record<ConversationProviderId, number>>;
 export interface LivePreflightRequest {
   /** Slot revisions the panel displayed. A mismatch means the command came from an outdated view. */
   readonly expectedRevisions?: LinkRevisions;
-  /** For an existing live session: the targets it was started with. They must not have changed. */
-  readonly expectedTargets?: LiveTargetBindings;
+  /**
+   * For an existing live session: where each participant is bound now. A saved
+   * conversation must still be linked and shown; a new chat must still be the
+   * same approved document; an unresolved first message blocks the participant.
+   */
+  readonly expectedTargets?: LiveTargetStates;
 }
+
+/**
+ * What the link of a provider designates as its live target, independently of
+ * whether its page answered. Lets the panel tell a saved conversation from a new chat.
+ */
+export type PreflightTarget =
+  | { readonly kind: 'conversation'; readonly conversationId: string }
+  | { readonly kind: 'new-chat' };
 
 export interface ProviderPreflight {
   readonly provider: ConversationProviderId;
@@ -57,7 +71,13 @@ export interface ProviderPreflight {
   readonly technicallyReady: boolean;
   readonly authorized: boolean;
   readonly ready: boolean;
-  /** The linked conversation, when the connection is available. */
+  /** The link's live target, when the connection is available. */
+  readonly target: PreflightTarget | null;
+  /**
+   * The binding a live debate would use. For a saved conversation it is set
+   * when the connection is available; for a new chat only once its page
+   * answered, because the binding records the observed document.
+   */
   readonly binding: LiveTargetBinding | null;
   readonly issues: readonly PreflightIssue[];
 }
@@ -80,11 +100,18 @@ export interface LivePreflight {
   /** Checks every capability of both providers. Never throws. */
   run(request?: LivePreflightRequest): Promise<LivePreflightResult>;
   /**
-   * Re-verifies one bound conversation immediately before a live operation:
-   * the link must still be healthy and point at the same tab and conversation,
-   * and the page must answer and show that conversation.
+   * Re-verifies one binding immediately before a live operation: the link must
+   * still be healthy and point at the same tab and conversation (or the same
+   * new chat), and the page must answer and show it. A new chat must still be
+   * the same document.
    */
   verifyTarget(binding: LiveTargetBinding): Promise<TargetVerification>;
+  /**
+   * After the first message to a new chat: reports what the linked tab shows
+   * now. The expected transition (the same tab moving from the new chat to a
+   * conversation of the same provider and origin) is reported, not rejected.
+   */
+  observeNewChat(binding: NewChatBinding): Promise<NewChatObservation>;
 }
 
 /**
@@ -98,27 +125,31 @@ export function createLivePreflight(deps: LivePreflightDependencies): LivePrefli
     return deps.connections.getSnapshot();
   };
 
-  const checkTransport = async (
-    binding: LiveTargetBinding,
-  ): Promise<{ check: CapabilityCheck; target: LiveConversationTarget | null }> => {
-    let probe: ProviderProbeResult;
+  const probe = async (tabId: BrowserTabId, provider: ConversationProviderId): Promise<ProviderProbeResult> => {
     try {
-      probe = await deps.transport.probe(binding.tabId, binding.provider);
+      return await deps.transport.probe(tabId, provider);
     } catch {
-      probe = { ok: false, failure: { kind: 'transport-error', outcome: 'unknown' } };
+      return { ok: false, failure: { kind: 'transport-error', outcome: 'unknown' } };
     }
-    const issue = transportIssue(binding, probe);
-    if (issue !== null || !probe.ok) {
-      return { check: unavailable(issue ?? fallbackTransportIssue(binding.provider)), target: null };
+  };
+
+  const checkTransport = async (
+    linked: LinkedTarget,
+    expectedPageInstanceId: string | undefined,
+  ): Promise<{ check: CapabilityCheck; target: LiveConversationTarget | null }> => {
+    const result = await probe(linked.tabId, linked.provider);
+    const issue = transportIssue(linked, result, expectedPageInstanceId);
+    if (issue !== null || !result.ok) {
+      return { check: unavailable(issue ?? fallbackTransportIssue(linked.provider)), target: null };
     }
+    const { pageInstanceId } = result.status;
+    const { provider, tabId } = linked;
     return {
       check: AVAILABLE,
-      target: {
-        provider: binding.provider,
-        tabId: binding.tabId,
-        conversationId: binding.conversationId,
-        pageInstanceId: probe.status.pageInstanceId,
-      },
+      target:
+        linked.kind === 'conversation'
+          ? { kind: 'conversation', provider, tabId, conversationId: linked.conversationId, pageInstanceId }
+          : { kind: 'new-chat', provider, tabId, origin: linked.origin, pageInstanceId },
     };
   };
 
@@ -128,19 +159,24 @@ export function createLivePreflight(deps: LivePreflightDependencies): LivePrefli
     request: LivePreflightRequest,
   ): Promise<ProviderPreflight> => {
     const adapter = deps.adapters[provider];
-    const connection = evaluateConnection(
-      provider,
-      current.registry[provider],
-      current.discovery,
-      request.expectedRevisions?.[provider],
-      request.expectedTargets?.[provider],
-    );
-    const binding = connection.ok ? connection.binding : null;
+    const expected = request.expectedTargets?.[provider];
+    const connection =
+      expected?.kind === 'first-message'
+        ? unresolvedFirstMessage(provider)
+        : evaluateConnection(
+            provider,
+            current.registry[provider],
+            current.discovery,
+            request.expectedRevisions?.[provider],
+            expected?.binding,
+          );
+    const linked = connection.ok ? connection.target : null;
 
     let transport: CapabilityCheck = notChecked('Checked once the conversation link is available.');
     let target: LiveConversationTarget | null = null;
-    if (binding !== null) {
-      ({ check: transport, target } = await checkTransport(binding));
+    if (linked !== null) {
+      const expectedPage = expected?.binding.kind === 'new-chat' ? expected.binding.pageInstanceId : undefined;
+      ({ check: transport, target } = await checkTransport(linked, expectedPage));
     }
 
     const { submission, responseAcquisition } = await checkAdapter(provider, adapter, target);
@@ -158,7 +194,8 @@ export function createLivePreflight(deps: LivePreflightDependencies): LivePrefli
       technicallyReady: isTechnicallyReady(capabilities),
       authorized: isAuthorized(capabilities),
       ready: isLiveReady(capabilities),
-      binding,
+      target: linked === null ? null : preflightTarget(linked),
+      binding: linked === null ? null : bindingOf(linked, target),
       issues: issuesOf(capabilities),
     };
   };
@@ -190,11 +227,17 @@ export function createLivePreflight(deps: LivePreflightDependencies): LivePrefli
       if (!connection.ok) {
         return { ok: false, issue: connection.issue };
       }
-      const { check, target } = await checkTransport(connection.binding);
+      const expectedPage = binding.kind === 'new-chat' ? binding.pageInstanceId : undefined;
+      const { check, target } = await checkTransport(connection.target, expectedPage);
       if (check.status === 'unavailable') {
         return { ok: false, issue: check.issue };
       }
       return target === null ? { ok: false, issue: fallbackTransportIssue(binding.provider) } : { ok: true, target };
+    },
+
+    async observeNewChat(binding) {
+      const current = await snapshot();
+      return observeNewChatTab(binding, current, (tabId) => probe(tabId, binding.provider));
     },
   };
 }
@@ -203,14 +246,44 @@ export function createLivePreflight(deps: LivePreflightDependencies): LivePrefli
 // Connection
 // ---------------------------------------------------------------------------
 
+/**
+ * What a healthy link designates: a saved conversation, or an approved new
+ * chat that has not received its first message. A new chat has no
+ * conversation identifier; its document is identified by the page probe.
+ */
+export type LinkedTarget =
+  | {
+      readonly kind: 'conversation';
+      readonly provider: ConversationProviderId;
+      readonly tabId: BrowserTabId;
+      readonly conversationId: string;
+      readonly linkRevision: number;
+      readonly source: BindingSource;
+    }
+  | {
+      readonly kind: 'new-chat';
+      readonly provider: ConversationProviderId;
+      readonly tabId: BrowserTabId;
+      readonly origin: string;
+      readonly linkRevision: number;
+    };
+
 export type ConnectionEvaluation =
-  | { readonly ok: true; readonly binding: LiveTargetBinding }
+  | { readonly ok: true; readonly target: LinkedTarget }
   | { readonly ok: false; readonly issue: PreflightIssue };
 
 /**
- * Pure check of one provider's link. A live debate needs a saved
- * conversation shown in its linked tab: pending and unconfirmed new chats,
- * stale, disconnected and unverifiable links are all rejected.
+ * Pure check of one provider's link. A live debate can target a saved
+ * conversation shown in its linked tab, or a linked new chat shown in its tab
+ * (status `awaiting-identity`): the missing conversation identifier is
+ * expected there and does not block. Unconfirmed identities, stale,
+ * disconnected and unverifiable links are rejected.
+ *
+ * With `expectedTarget` (an existing session), the link must still designate
+ * exactly that target. A conversation bound from a new chat's first message,
+ * or by the human during recovery, is also accepted while the link still asks
+ * for confirmation of that same conversation: the binding was made on
+ * stronger evidence than the link's own tab observation.
  */
 export function evaluateConnection(
   provider: ConversationProviderId,
@@ -224,6 +297,13 @@ export function evaluateConnection(
     ok: false,
     issue: { provider, capability: 'connection', code, message },
   });
+  const targetChanged = (): ConnectionEvaluation =>
+    fail(
+      'target-changed',
+      expectedTarget?.kind === 'new-chat'
+        ? `The ${label} link no longer points at the new chat this debate was started with. A live debate cannot move to another chat or conversation; start a new debate.`
+        : `The ${label} link now points at a different tab or conversation than the one this debate is bound to. A live debate cannot move to another conversation; reconnect the original one or start a new debate.`,
+    );
 
   if (expectedRevision !== undefined && expectedRevision !== slot.revision) {
     return fail(
@@ -240,35 +320,45 @@ export function evaluateConnection(
   const { link } = slot;
   if (link === null) {
     return expectedTarget === undefined
-      ? fail('not-linked', `No ${label} conversation is linked. Link a saved ${label} conversation under Linked conversations.`)
+      ? fail(
+          'not-linked',
+          `Nothing is linked for ${label}. Link a saved ${label} conversation or a new ${label} chat under Linked conversations.`,
+        )
       : fail(
           'target-changed',
-          `The ${label} conversation this debate was started with is no longer linked. A live debate cannot move to another conversation; reconnect it or start a new debate.`,
+          `The ${label} conversation or new chat this debate is bound to is no longer linked. A live debate cannot move to another conversation; reconnect it or start a new debate.`,
         );
+  }
+  if (expectedTarget !== undefined && expectedTarget.tabId !== link.tabId) {
+    return targetChanged();
   }
   const status = linkStatus(link);
   switch (status.kind) {
     case 'linked':
-      break;
     case 'awaiting-identity':
-      return fail(
-        'identity-pending',
-        `The linked ${label} tab is a new chat that has no saved conversation yet. A live debate must be bound to a saved conversation so every response can be matched to it. Link a saved ${label} conversation instead.`,
-      );
+      break;
     case 'confirmation-required':
+      if (
+        expectedTarget?.kind === 'conversation' &&
+        expectedTarget.source !== 'linked' &&
+        link.identity.kind === 'unconfirmed' &&
+        link.identity.conversationId === expectedTarget.conversationId
+      ) {
+        break;
+      }
       return fail(
         'identity-unconfirmed',
-        `The conversation in the linked ${label} tab has not been confirmed. Confirm it under Linked conversations, or link another saved conversation.`,
+        `The conversation in the linked ${label} tab has not been confirmed. Confirm it under Linked conversations, or link another conversation or new chat.`,
       );
     case 'stale':
       return fail(
         'link-stale',
-        `The linked ${label} tab no longer shows the linked conversation. Reconnect it under Linked conversations, or link another conversation.`,
+        `The linked ${label} tab no longer shows the linked conversation or new chat. Reconnect it under Linked conversations, or link another one.`,
       );
     case 'disconnected':
       return fail(
         'link-disconnected',
-        `The linked ${label} tab was closed. Reopen the conversation and reconnect it under Linked conversations.`,
+        `The linked ${label} tab was closed. Reopen the conversation and reconnect it, or link another conversation or new chat, under Linked conversations.`,
       );
     case 'unavailable':
       return fail(
@@ -276,34 +366,146 @@ export function evaluateConnection(
         `ThirdMind cannot currently verify the linked ${label} tab. Click Refresh under Linked conversations and try again.`,
       );
   }
-  if (link.identity.kind !== 'saved') {
-    // Unreachable: `linkStatus` reports every other identity above.
-    return fail('identity-pending', `The linked ${label} conversation has no saved identity.`);
+
+  const { identity } = link;
+  if (identity.kind === 'pending') {
+    if (expectedTarget !== undefined && (expectedTarget.kind !== 'new-chat' || expectedTarget.origin !== link.origin)) {
+      return targetChanged();
+    }
+    return {
+      ok: true,
+      target: { kind: 'new-chat', provider, tabId: link.tabId, origin: link.origin, linkRevision: slot.revision },
+    };
   }
-  const binding: LiveTargetBinding = {
-    provider,
-    tabId: link.tabId,
-    conversationId: link.identity.conversationId,
-    linkRevision: slot.revision,
-  };
   if (
     expectedTarget !== undefined &&
-    (expectedTarget.tabId !== binding.tabId || expectedTarget.conversationId !== binding.conversationId)
+    (expectedTarget.kind !== 'conversation' || expectedTarget.conversationId !== identity.conversationId)
   ) {
-    return fail(
-      'target-changed',
-      `The ${label} link now points at a different tab or conversation than the one this debate was started with. A live debate cannot move to another conversation; reconnect the original one or start a new debate.`,
-    );
+    return targetChanged();
   }
-  return { ok: true, binding };
+  return {
+    ok: true,
+    target: {
+      kind: 'conversation',
+      provider,
+      tabId: link.tabId,
+      conversationId: identity.conversationId,
+      linkRevision: slot.revision,
+      source: expectedTarget?.kind === 'conversation' ? expectedTarget.source : 'linked',
+    },
+  };
+}
+
+function unresolvedFirstMessage(provider: ConversationProviderId): ConnectionEvaluation {
+  const label = providerName(provider);
+  return {
+    ok: false,
+    issue: {
+      provider,
+      capability: 'connection',
+      code: 'identity-unresolved',
+      message: `The first message of this debate may have been sent to the linked new ${label} chat, but ThirdMind could not establish which conversation it created. Nothing more is sent to ${label} until you resolve it: continue in the conversation the linked tab now shows, or keep the new chat if it shows no message.`,
+    },
+  };
+}
+
+function preflightTarget(linked: LinkedTarget): PreflightTarget {
+  return linked.kind === 'conversation'
+    ? { kind: 'conversation', conversationId: linked.conversationId }
+    : { kind: 'new-chat' };
+}
+
+function bindingOf(linked: LinkedTarget, target: LiveConversationTarget | null): LiveTargetBinding | null {
+  if (linked.kind === 'conversation') {
+    const { provider, tabId, conversationId, linkRevision, source } = linked;
+    return { kind: 'conversation', provider, tabId, conversationId, linkRevision, source };
+  }
+  return target?.kind === 'new-chat'
+    ? {
+        kind: 'new-chat',
+        provider: linked.provider,
+        tabId: linked.tabId,
+        origin: linked.origin,
+        pageInstanceId: target.pageInstanceId,
+        linkRevision: linked.linkRevision,
+      }
+    : null;
+}
+
+// ---------------------------------------------------------------------------
+// New chat after its first message
+// ---------------------------------------------------------------------------
+
+/**
+ * Reads what the linked tab of a new-chat binding shows, from a fresh link
+ * reconciliation and a page probe. The link's own reconciliation
+ * (`observeLink`) already decides whether the tab's move to a conversation is
+ * plausible for this new chat: a conversation that was open elsewhere before,
+ * another provider or origin, a non-chat page or a closed tab makes the link
+ * stale or disconnected, which invalidates the target here.
+ */
+export async function observeNewChatTab(
+  binding: NewChatBinding,
+  current: ConnectionsSnapshot,
+  probe: (tabId: BrowserTabId) => Promise<ProviderProbeResult>,
+): Promise<NewChatObservation> {
+  const label = providerName(binding.provider);
+  const invalid = (reason: string): NewChatObservation => ({ kind: 'invalid', reason });
+  if (current.discovery.status !== 'ready') {
+    return invalid(`ThirdMind could not list the open tabs, so the linked ${label} tab could not be observed.`);
+  }
+  const slot = current.registry[binding.provider];
+  const { link } = slot;
+  if (link === null || link.tabId !== binding.tabId || link.origin !== binding.origin) {
+    return invalid(`The ${label} link no longer points at the new chat this debate was started with.`);
+  }
+  switch (linkStatus(link).kind) {
+    case 'linked':
+    case 'awaiting-identity':
+    case 'confirmation-required':
+      break;
+    case 'stale':
+      return invalid(`The linked ${label} tab moved to an unrelated page or conversation.`);
+    case 'disconnected':
+      return invalid(`The linked ${label} tab was closed.`);
+    case 'unavailable':
+      return invalid(`ThirdMind cannot currently verify the linked ${label} tab.`);
+  }
+  const result = await probe(binding.tabId);
+  if (!result.ok) {
+    return invalid(`The linked ${label} page could not be reached.`);
+  }
+  const { status } = result;
+  if (status.provider !== binding.provider || status.tabId !== binding.tabId) {
+    return invalid(`The linked tab does not show a ${label} page.`);
+  }
+  const { identity } = link;
+  if (identity.kind === 'pending') {
+    return status.page.kind === 'new-chat'
+      ? { kind: 'new-chat', pageInstanceId: status.pageInstanceId, linkRevision: slot.revision }
+      : invalid(`The linked ${label} tab and its page disagree about what they show.`);
+  }
+  if (status.page.kind !== 'conversation' || status.page.conversationId !== identity.conversationId) {
+    return invalid(`The linked ${label} tab and its page disagree about which conversation they show.`);
+  }
+  return {
+    kind: 'conversation',
+    conversationId: identity.conversationId,
+    pageInstanceId: status.pageInstanceId,
+    linkRevision: slot.revision,
+  };
 }
 
 // ---------------------------------------------------------------------------
 // Transport
 // ---------------------------------------------------------------------------
 
-function transportIssue(binding: LiveTargetBinding, probe: ProviderProbeResult): PreflightIssue | null {
-  const { provider } = binding;
+function transportIssue(
+  linked: LinkedTarget,
+  probe: ProviderProbeResult,
+  expectedPageInstanceId: string | undefined,
+): PreflightIssue | null {
+  const { provider } = linked;
   const label = providerName(provider);
   const issue = (code: PreflightIssueCode, message: string): PreflightIssue => ({
     provider,
@@ -344,12 +546,30 @@ function transportIssue(binding: LiveTargetBinding, probe: ProviderProbeResult):
     }
   }
   const { status } = probe;
-  // The page classifies its own URL; it must show exactly the bound conversation.
-  if (status.page.kind !== 'conversation' || status.page.conversationId !== binding.conversationId) {
-    return issue(
-      'target-changed',
-      `The linked ${label} page no longer shows the linked conversation. Reconnect it under Linked conversations.`,
-    );
+  if (status.provider !== provider || status.tabId !== linked.tabId) {
+    return issue('transport-unavailable', `The linked tab does not show a ${label} page.`);
+  }
+  // The page classifies its own URL; it must show exactly the linked conversation or new chat.
+  if (linked.kind === 'conversation') {
+    if (status.page.kind !== 'conversation' || status.page.conversationId !== linked.conversationId) {
+      return issue(
+        'target-changed',
+        `The linked ${label} page no longer shows the linked conversation. Reconnect it under Linked conversations.`,
+      );
+    }
+  } else {
+    if (status.page.kind !== 'new-chat') {
+      return issue(
+        'target-changed',
+        `The linked ${label} page no longer shows the linked new chat. Link it again under Linked conversations.`,
+      );
+    }
+    if (expectedPageInstanceId !== undefined && status.pageInstanceId !== expectedPageInstanceId) {
+      return issue(
+        'target-changed',
+        `The linked new ${label} chat was reloaded or replaced since this debate started, so it is no longer the page that was approved.`,
+      );
+    }
   }
   switch (status.readiness) {
     case 'ready':
@@ -391,7 +611,8 @@ function authorizationCheck(provider: ConversationProviderId, adapter: LiveProvi
 
 /**
  * Submission and response capabilities come only from the adapter's own
- * report for a verified target. A page that answered the probe is not enough.
+ * report for a verified target, saved conversation or new chat alike. A page
+ * that answered the probe is not enough.
  */
 async function checkAdapter(
   provider: ConversationProviderId,

@@ -5,9 +5,10 @@ import {
   type CapabilityName,
   type LinkRevisions,
   type LivePreflightResult,
+  type PreflightTarget,
   type ProviderPreflight,
 } from '../../application';
-import { providerLabel } from '../format';
+import { providerLabel, shortConversationId } from '../format';
 import { TopicFields, parseTopicAndConstraints } from './SetupForm';
 
 export interface LiveStartValues {
@@ -44,12 +45,32 @@ export function liveStartState(readiness: LivePreflightResult | null, current: L
 }
 
 export const CAPABILITY_LABELS: Readonly<Record<CapabilityName, string>> = {
-  connection: 'Linked conversation',
+  connection: 'Linked conversation or new chat',
   transport: 'Page connection',
   submission: 'Message submission',
   responseAcquisition: 'Response acquisition',
   authorization: 'Authorized automation route',
 };
+
+/**
+ * How the panel describes a provider's live target. A new chat is a valid
+ * target: its conversation is created by the debate's first message.
+ */
+export function targetDescription(target: PreflightTarget | null): string {
+  if (target === null) {
+    return 'none available';
+  }
+  return target.kind === 'conversation'
+    ? `saved conversation ${shortConversationId(target.conversationId)}`
+    : "new chat (the debate's first message creates the conversation, which ThirdMind then binds)";
+}
+
+function readinessBadge(provider: ProviderPreflight): string {
+  if (!provider.ready) {
+    return 'Not ready';
+  }
+  return provider.target?.kind === 'new-chat' ? 'Ready: new chat' : 'Ready: saved conversation';
+}
 
 function checkLabel(check: CapabilityCheck): string {
   switch (check.status) {
@@ -110,9 +131,11 @@ export function LiveDebateSetup({ readiness, currentRevisions, onCheck, onStart 
         </button>
       </div>
       <p className="hint">
-        A live debate runs between the linked ChatGPT and Claude conversations without manual copying. It starts only
-        when both providers are technically ready <em>and</em> reached through an authorized automation route. Reaching
-        a provider page is not the same as being permitted to automate it.
+        A live debate runs between the linked ChatGPT and Claude targets without manual copying. Each target can be a
+        saved conversation or a new chat: a new chat receives the debate&rsquo;s first message, and ThirdMind binds
+        the conversation it creates. It starts only when both providers are technically ready <em>and</em> reached
+        through an authorized automation route. Reaching a provider page is not the same as being permitted to
+        automate it.
       </p>
 
       {state === 'checking' && <p className="muted">Checking live readiness…</p>}
@@ -172,8 +195,9 @@ function ProviderReadiness({ provider }: { readonly provider: ProviderPreflight 
     <div className="live-provider">
       <h3>
         {label}{' '}
-        <span className={provider.ready ? 'badge badge-ready' : 'badge'}>{provider.ready ? 'Ready' : 'Not ready'}</span>
+        <span className={provider.ready ? 'badge badge-ready' : 'badge'}>{readinessBadge(provider)}</span>
       </h3>
+      <p className="muted">Target: {targetDescription(provider.target)}</p>
       <p className="muted">
         Route: {provider.route?.label ?? 'no live adapter installed'} · Technical readiness:{' '}
         {provider.technicallyReady ? 'yes' : 'no'} · Authorization: {provider.authorized ? 'yes' : 'no'}
