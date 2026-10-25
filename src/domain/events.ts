@@ -26,6 +26,7 @@ export type DebateEvent =
   | ContributionDispatched
   | ContributionReceived
   | ContributionFailed
+  | ContributionOutcomeUncertain
   | RoundAdvanced
   | PauseRequested
   | DebatePaused
@@ -89,6 +90,19 @@ export interface ContributionFailed {
   readonly at: Timestamp;
   readonly operationId: OperationId;
   readonly error: string;
+}
+
+/**
+ * The provider could not tell whether a dispatched request was acted on (for
+ * example, it timed out after submitting a message). The operation becomes
+ * `uncertain`; it is never retried automatically, and the debate pauses for
+ * the human to review it.
+ */
+export interface ContributionOutcomeUncertain {
+  readonly type: 'ContributionOutcomeUncertain';
+  readonly at: Timestamp;
+  readonly operationId: OperationId;
+  readonly detail: string;
 }
 
 export interface RoundAdvanced {

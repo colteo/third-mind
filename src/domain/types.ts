@@ -18,10 +18,11 @@ export type InterventionId = string;
 /**
  * How a participant is bound to the outside world.
  *
- * Phase 1 only ships deterministic simulators. Live bindings (for example a
- * connected ChatGPT or Claude conversation) will be added as new members.
+ * - `gpt-simulator`, `claude-simulator`: deterministic local simulators;
+ * - `chatgpt-live`, `claude-live`: a linked ChatGPT or Claude conversation,
+ *   reached through a live provider adapter. Only used in live mode.
  */
-export type ProviderType = 'human' | 'gpt-simulator' | 'claude-simulator';
+export type ProviderType = 'human' | 'gpt-simulator' | 'claude-simulator' | 'chatgpt-live' | 'claude-live';
 
 export interface Participant {
   readonly id: ParticipantId;
@@ -99,8 +100,9 @@ export interface HumanIntervention {
  * - `dispatched`: handed to a provider; a result is expected.
  * - `acknowledged`: a result was received and recorded as a contribution.
  * - `failed`: the provider reported a failure.
- * - `uncertain`: the runtime restarted while the operation was dispatched. The
- *   provider may or may not have received or processed it.
+ * - `uncertain`: the provider may or may not have received or processed it:
+ *   the runtime restarted while the operation was dispatched, or the provider
+ *   reported an unknown outcome (for example, a timeout after submission).
  * - `superseded`: a human explicitly approved re-issuing an uncertain
  *   operation; a later attempt replaces it and late results are discarded.
  */
@@ -143,10 +145,26 @@ export type ProviderOperation =
         readonly settledAt: Timestamp;
         readonly error: string;
       })
-  | (OperationBase & DispatchDetails & { readonly status: 'uncertain'; readonly detectedAt: Timestamp })
+  | (OperationBase &
+      DispatchDetails & {
+        readonly status: 'uncertain';
+        readonly detectedAt: Timestamp;
+        /** Absent in checkpoints written before live mode existed; those are always `runtime-restart`. */
+        readonly cause?: UncertaintyCause;
+        /** Provider-supplied explanation for an `unknown-outcome`. */
+        readonly detail?: string;
+      })
   | (OperationBase & DispatchDetails & { readonly status: 'superseded'; readonly supersededAt: Timestamp });
 
-export type PauseReason = 'human-request' | 'runtime-restart';
+/**
+ * Why an operation became uncertain:
+ * - `runtime-restart`: the runtime restarted while it was dispatched;
+ * - `unknown-outcome`: the provider reported that it cannot tell whether the
+ *   request was acted on (for example, a timeout after submission).
+ */
+export type UncertaintyCause = 'runtime-restart' | 'unknown-outcome';
+
+export type PauseReason = 'human-request' | 'runtime-restart' | 'uncertain-outcome';
 
 export type CompletionReason = 'early-convergence' | 'maximum-rounds-reached';
 

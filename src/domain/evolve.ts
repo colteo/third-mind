@@ -8,6 +8,7 @@ import {
 import type {
   ContributionDispatched,
   ContributionFailed,
+  ContributionOutcomeUncertain,
   ContributionReceived,
   ContributionRequested,
   DebateCompleted,
@@ -78,6 +79,8 @@ export function evolve(state: EngineState, event: DebateEvent): EvolveResult {
       return onContributionReceived(state, event);
     case 'ContributionFailed':
       return onContributionFailed(state, event);
+    case 'ContributionOutcomeUncertain':
+      return onContributionOutcomeUncertain(state, event);
     case 'RoundAdvanced':
       return onRoundAdvanced(state, event);
     case 'PauseRequested':
@@ -98,7 +101,10 @@ export function evolve(state: EngineState, event: DebateEvent): EvolveResult {
       if (dispatchedOperations(state).length > 0) {
         return rejected(state, 'Cannot confirm the pause while provider operations are still in flight.');
       }
-      return applied(state, event.at, { status: { kind: 'paused', reason: 'human-request' } });
+      // A pause that was entered because an outcome became uncertain keeps that reason.
+      return applied(state, event.at, {
+        status: { kind: 'paused', reason: uncertainOperations(state).length > 0 ? 'uncertain-outcome' : 'human-request' },
+      });
     case 'HumanConstraintAdded':
       return onHumanConstraintAdded(state, event);
     case 'DebateResumed':
@@ -356,6 +362,48 @@ function onContributionFailed(state: DebateSession, event: ContributionFailed): 
   }
 }
 
+function onContributionOutcomeUncertain(state: DebateSession, event: ContributionOutcomeUncertain): EvolveResult {
+  const operation = findOperation(state, event.operationId);
+  if (operation === undefined) {
+    return rejected(state, `Unknown operation ${event.operationId}.`);
+  }
+  switch (operation.status) {
+    case 'pending':
+      return rejected(state, `Operation ${operation.id} was never dispatched.`);
+    case 'uncertain':
+      return ignored(state, `Operation ${operation.id} is already uncertain.`);
+    case 'acknowledged':
+    case 'failed':
+    case 'superseded':
+      return ignored(state, `Operation ${operation.id} has already been settled; the report is discarded.`);
+    case 'dispatched': {
+      const uncertain: ProviderOperation = {
+        id: operation.id,
+        round: operation.round,
+        phase: operation.phase,
+        participantId: operation.participantId,
+        attempt: operation.attempt,
+        requestedAt: operation.requestedAt,
+        dispatchedAt: operation.dispatchedAt,
+        interventionIds: operation.interventionIds,
+        status: 'uncertain',
+        detectedAt: event.at,
+        cause: 'unknown-outcome',
+        detail: event.detail,
+      };
+      const operations = replaceOperation(state, uncertain);
+      const othersInFlight = operations.some((candidate) => candidate.status === 'dispatched');
+      // Stop scheduling new work. While other requests are still in flight the debate is `pausing`, so it
+      // never claims to be paused with work outstanding; the pause is confirmed once they settle.
+      let status: DebateStatus = state.status;
+      if (state.status.kind === 'running' || state.status.kind === 'pausing') {
+        status = othersInFlight ? { kind: 'pausing' } : { kind: 'paused', reason: 'uncertain-outcome' };
+      }
+      return applied(state, event.at, { operations, status });
+    }
+  }
+}
+
 function onRoundAdvanced(state: DebateSession, event: RoundAdvanced): EvolveResult {
   if (event.toRound === state.currentRound && state.status.kind === 'running') {
     return ignored(state, `Round ${event.toRound} is already the current round.`);
@@ -403,7 +451,7 @@ function onDebateCompleted(state: DebateSession, event: DebateCompleted): Evolve
 function onRuntimeRecovered(state: DebateSession, event: RuntimeRecovered): EvolveResult {
   const operations = state.operations.map((operation): ProviderOperation =>
     operation.status === 'dispatched'
-      ? { ...operation, status: 'uncertain', detectedAt: event.at }
+      ? { ...operation, status: 'uncertain', detectedAt: event.at, cause: 'runtime-restart' }
       : operation,
   );
   const status: DebateStatus =

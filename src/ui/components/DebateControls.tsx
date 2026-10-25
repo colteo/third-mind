@@ -1,4 +1,5 @@
 import { useId, useState, type FormEvent } from 'react';
+import type { ExecutionMode } from '../../application';
 import {
   MAX_CONSTRAINT_LENGTH,
   PHASE_TITLES,
@@ -10,10 +11,11 @@ import {
   type OperationId,
 } from '../../domain';
 import { simulationPace, type SimulationPaceId } from '../../infrastructure/simulator/scenarios';
-import { statusLabel } from '../format';
+import { statusLabel, uncertaintyReason } from '../format';
 
 interface DebateControlsProps {
   readonly session: DebateSession;
+  readonly mode: ExecutionMode;
   readonly pace: SimulationPaceId | null;
   readonly onPause: () => void;
   readonly onResume: () => void;
@@ -23,7 +25,7 @@ interface DebateControlsProps {
 }
 
 export function DebateControls(props: DebateControlsProps) {
-  const { session, pace } = props;
+  const { session, mode, pace } = props;
   const id = useId();
   const actions = availableActions(session);
   const uncertain = uncertainOperations(session);
@@ -38,7 +40,9 @@ export function DebateControls(props: DebateControlsProps) {
         <span className={`status status-${status.kind}`}>{statusLabel(status, 'connected')}</span>
         <span className="muted">
           Round {session.currentRound} of {session.configuration.maximumRounds}
-          {pace !== null && ` · simulated responses, ${simulationPace(pace).label.toLowerCase()} pace`}
+          {mode === 'live'
+            ? ' · live responses from the linked conversations'
+            : pace !== null && ` · simulated responses, ${simulationPace(pace).label.toLowerCase()} pace`}
         </span>
       </p>
 
@@ -46,12 +50,27 @@ export function DebateControls(props: DebateControlsProps) {
         <p className="hint">Pause stops new requests. Responses already in flight are still recorded.</p>
       )}
       {status.kind === 'pausing' && (
-        <p className="hint">Pausing. No new requests are sent; waiting for in-flight simulated responses to arrive.</p>
+        <p className="hint">
+          Pausing. No new requests are sent; waiting for in-flight {mode === 'live' ? '' : 'simulated '}responses to
+          arrive.
+        </p>
       )}
       {status.kind === 'paused' && status.reason === 'runtime-restart' && (
         <p className="hint">
           The background service restarted and the debate was restored from its checkpoint. It stays paused until you
           resume it.
+        </p>
+      )}
+      {status.kind === 'paused' && status.reason === 'uncertain-outcome' && (
+        <p className="hint">
+          The debate paused because a participant could not confirm whether a request was acted on. Review the request
+          below; nothing is sent again without your approval.
+        </p>
+      )}
+      {mode === 'live' && status.kind === 'paused' && (
+        <p className="hint">
+          Before a live debate resumes or a request is sent again, ThirdMind checks that both linked conversations are
+          unchanged and every live capability is still available.
         </p>
       )}
       {status.kind === 'paused' && actions.addConstraint && (
@@ -68,16 +87,15 @@ export function DebateControls(props: DebateControlsProps) {
         <div className="uncertain" role="group" aria-labelledby={`${id}-uncertain`}>
           <h3 id={`${id}-uncertain`}>Requests with unknown outcome</h3>
           <p className="hint">
-            These requests were in flight when the background service stopped. ThirdMind cannot tell whether the
-            participant received them, so it does not resend them automatically. Requesting again may produce a
-            duplicate message for a real provider.
+            ThirdMind cannot tell whether the participant received these requests, so it does not resend them
+            automatically. Requesting again may produce a duplicate message for a real provider.
           </p>
           <ul className="uncertain-list">
             {uncertain.map((operation) => (
               <li key={operation.id}>
                 <span>
                   {findParticipant(session, operation.participantId)?.displayName ?? operation.participantId}, round{' '}
-                  {operation.round} ({PHASE_TITLES[operation.phase]})
+                  {operation.round} ({PHASE_TITLES[operation.phase]}): {uncertaintyReason(operation)}
                 </span>
                 <button
                   type="button"

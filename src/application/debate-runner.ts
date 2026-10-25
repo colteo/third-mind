@@ -49,7 +49,10 @@ export type RunnerResult = { readonly ok: true } | { readonly ok: false; readonl
 export type SnapshotListener<TSetup> = (snapshot: RunnerSnapshot<TSetup>) => void;
 
 export interface DebateRunner<TSetup> {
-  /** Restores a checkpointed session, if any. In-flight work from before the restart becomes uncertain. */
+  /**
+   * Restores a checkpointed session, if any. In-flight work from before the restart becomes uncertain.
+   * Recovery never re-dispatches anything: the session stays paused until the human acts.
+   */
   initialize(): Promise<void>;
   getSnapshot(): RunnerSnapshot<TSetup>;
   subscribe(listener: SnapshotListener<TSetup>): () => void;
@@ -220,7 +223,10 @@ export function createDebateRunner<TSetup>(deps: DebateRunnerDependencies<TSetup
                 assessment: result.assessment,
                 origin: provider?.origin ?? 'live',
               }
-            : { type: 'ContributionFailed', at, operationId: request.operationId, error: result.error.message };
+            : result.outcome === 'unknown'
+              ? // Never treated as a failure and never retried: the request may have been acted on.
+                { type: 'ContributionOutcomeUncertain', at, operationId: request.operationId, detail: result.error.message }
+              : { type: 'ContributionFailed', at, operationId: request.operationId, error: result.error.message };
           const recorded = await record(event);
           if (!recorded.ok) {
             deps.reportError(new Error(`Result for ${request.operationId} was rejected: ${recorded.reason}`));

@@ -50,14 +50,54 @@ describe('client message parsing', () => {
 
 describe('host message parsing', () => {
   it('accepts snapshots and rejections, and nothing else', () => {
-    const snapshot = {
-      type: 'snapshot',
-      snapshot: { mode: 'simulation', participants: [], session: null, scenario: null, pace: null },
-    };
-    expect(parseHostMessage(snapshot)).toEqual(snapshot);
+    for (const mode of [null, 'simulation', 'live']) {
+      const snapshot = {
+        type: 'snapshot',
+        snapshot: { mode, participants: [], liveParticipants: [], session: null, scenario: null, pace: null },
+      };
+      expect(parseHostMessage(snapshot)).toEqual(snapshot);
+    }
     expect(parseHostMessage({ type: 'command-rejected', command: 'pause', reason: 'No' })).not.toBeNull();
     expect(parseHostMessage({ type: 'snapshot', snapshot: { mode: 'live' } })).toBeNull();
+    expect(
+      parseHostMessage({ type: 'snapshot', snapshot: { mode: 'remote', participants: [], liveParticipants: [] } }),
+    ).toBeNull();
     expect(parseHostMessage(42)).toBeNull();
+  });
+
+  it('accepts live readiness results', () => {
+    const message = { type: 'live-readiness', readiness: { ready: false, providers: [], issues: [] } };
+    expect(parseHostMessage(message)).toEqual(message);
+    expect(parseHostMessage({ type: 'live-readiness', readiness: {} })).toBeNull();
+  });
+});
+
+describe('live message parsing', () => {
+  it('accepts a readiness check and a live start with link revisions', () => {
+    expect(parseClientMessage({ type: 'check-live-readiness' })).toEqual({ type: 'check-live-readiness' });
+    expect(
+      parseClientMessage({
+        type: 'start-live',
+        topic: 'T',
+        constraints: ['a'],
+        expectedRevisions: { chatgpt: 2, claude: 5 },
+        extra: 'ignored',
+      }),
+    ).toEqual({ type: 'start-live', topic: 'T', constraints: ['a'], expectedRevisions: { chatgpt: 2, claude: 5 } });
+  });
+
+  it.each<[unknown]>([
+    [{ type: 'start-live', topic: 'T', constraints: [] }],
+    [{ type: 'start-live', topic: 'T', constraints: [], expectedRevisions: { chatgpt: 1 } }],
+    [{ type: 'start-live', topic: 'T', constraints: [], expectedRevisions: { chatgpt: -1, claude: 0 } }],
+    [{ type: 'start-live', topic: 'T', constraints: [3], expectedRevisions: { chatgpt: 0, claude: 0 } }],
+    [{ type: 'start-live', topic: 7, constraints: [], expectedRevisions: { chatgpt: 0, claude: 0 } }],
+  ])('rejects a malformed live start %#', (value) => {
+    expect(parseClientMessage(value)).toBeNull();
+  });
+
+  it('never routes live commands to the connection coordinator', () => {
+    expect(isConnectionMessage({ type: 'check-live-readiness' })).toBe(false);
   });
 });
 

@@ -863,3 +863,90 @@ textarea[aria-invalid='true'] {
   border-style: dashed;
   margin-right: var(--space-1);
 }
+
+/* Execution modes and live readiness (live execution foundation) */
+
+.badge-live {
+  border-color: var(--color-info-text);
+  color: var(--color-info-text);
+  background: var(--color-info-bg);
+}
+
+.badge-ready {
+  border-color: var(--color-success);
+  color: var(--color-success);
+}
+
+.notice-warning {
+  background: var(--color-warning-bg);
+  color: var(--color-warning-text);
+}
+
+.live-providers {
+  display: grid;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.live-provider h3 {
+  margin: 0 0 var(--space-1);
+  font-size: 0.95rem;
+}
+
+.live-provider > .muted {
+  margin: 0 0 var(--space-2);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+.capabilities {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-2);
+}
+
+.capability {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0 var(--space-2);
+  font-size: 0.85rem;
+}
+
+.capability-status {
+  font-weight: 600;
+}
+
+.capability-available .capability-status {
+  color: var(--color-success);
+}
+
+.capability-unavailable .capability-status {
+  color: var(--color-error-text);
+}
+
+.capability-not-checked .capability-status {
+  color: var(--color-muted);
+}
+
+.capability-detail {
+  grid-column: 1 / -1;
+  color: var(--color-muted);
+  overflow-wrap: anywhere;
+}
+
+.live-blockers ul {
+  margin: var(--space-1) 0;
+  padding-left: var(--space-4);
+}
+
+.live-blockers-title {
+  margin: 0;
+  font-weight: 600;
+}
+
+.live-blockers {
+  flex-direction: column;
+  margin-bottom: var(--space-3);
+}

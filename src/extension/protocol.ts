@@ -1,4 +1,4 @@
-import type { ConnectionsView } from '../application';
+import { isExecutionMode, type ConnectionsView, type ExecutionMode, type LivePreflightResult } from '../application';
 import {
   MAX_CONSTRAINT_LENGTH,
   MAX_CONSTRAINTS,
@@ -36,12 +36,14 @@ export const SIDE_PANEL_PORT_NAME = 'thirdmind/side-panel';
  */
 export type ClientMessage =
   | {
+      /** Starts a simulated debate. */
       readonly type: 'start';
       readonly topic: string;
       readonly constraints: readonly string[];
       readonly scenario: SimulationScenarioId;
       readonly pace: SimulationPaceId;
     }
+  | LiveClientMessage
   | { readonly type: 'pause'; readonly sessionId: SessionId }
   | { readonly type: 'resume'; readonly sessionId: SessionId }
   | { readonly type: 'add-constraint'; readonly sessionId: SessionId; readonly content: string }
@@ -100,6 +102,21 @@ export interface PageCheckClientMessage {
   readonly provider: ConversationProviderId;
 }
 
+/**
+ * Live debate commands. `check-live-readiness` runs the preflight and never
+ * changes anything. `start-live` carries the link revisions of the readiness
+ * view the human acted on; the host runs the preflight again and rejects the
+ * command if any link changed since, or if any capability is unavailable.
+ */
+export type LiveClientMessage =
+  | { readonly type: 'check-live-readiness' }
+  | {
+      readonly type: 'start-live';
+      readonly topic: string;
+      readonly constraints: readonly string[];
+      readonly expectedRevisions: { readonly chatgpt: number; readonly claude: number };
+    };
+
 export type ClientMessageType = ClientMessage['type'];
 
 export function isConnectionMessage(message: ClientMessage): message is ConnectionClientMessage {
@@ -121,9 +138,12 @@ export interface PageCheckView {
 }
 
 export interface HostSnapshot {
-  readonly mode: 'simulation';
-  /** Participants a new session will use. */
+  /** Execution mode of the current session; `null` when there is none. */
+  readonly mode: ExecutionMode | null;
+  /** Participants a new simulated session will use. */
   readonly participants: readonly Participant[];
+  /** Participants a new live session will use. */
+  readonly liveParticipants: readonly Participant[];
   readonly session: DebateSession | null;
   readonly scenario: SimulationScenarioId | null;
   readonly pace: SimulationPaceId | null;
@@ -137,6 +157,8 @@ export type HostMessage =
   | { readonly type: 'snapshot'; readonly snapshot: HostSnapshot }
   | { readonly type: 'connections'; readonly connections: ConnectionsView }
   | { readonly type: 'page-check'; readonly check: PageCheckView }
+  /** Result of the latest live preflight. Contains link metadata and explanations only, never page content. */
+  | { readonly type: 'live-readiness'; readonly readiness: LivePreflightResult }
   | { readonly type: 'command-rejected'; readonly command: ClientMessageType | 'unknown'; readonly reason: string };
 
 export function parseClientMessage(value: unknown): ClientMessage | null {
@@ -145,18 +167,33 @@ export function parseClientMessage(value: unknown): ClientMessage | null {
   }
   if (value.type === 'start') {
     const { topic, constraints, scenario, pace } = value;
-    if (
-      typeof topic !== 'string' ||
-      topic.length > MAX_TOPIC_LENGTH ||
-      !Array.isArray(constraints) ||
-      constraints.length > MAX_CONSTRAINTS ||
-      !constraints.every((c): c is string => typeof c === 'string' && c.length <= MAX_CONSTRAINT_LENGTH) ||
-      !isSimulationScenarioId(scenario) ||
-      !isSimulationPaceId(pace)
-    ) {
+    if (!isTopic(topic) || !isConstraintList(constraints) || !isSimulationScenarioId(scenario) || !isSimulationPaceId(pace)) {
       return null;
     }
     return { type: 'start', topic, constraints, scenario, pace };
+  }
+
+  if (value.type === 'check-live-readiness') {
+    return { type: 'check-live-readiness' };
+  }
+
+  if (value.type === 'start-live') {
+    const { topic, constraints, expectedRevisions } = value;
+    if (
+      !isTopic(topic) ||
+      !isConstraintList(constraints) ||
+      !isRecord(expectedRevisions) ||
+      !isRevision(expectedRevisions.chatgpt) ||
+      !isRevision(expectedRevisions.claude)
+    ) {
+      return null;
+    }
+    return {
+      type: 'start-live',
+      topic,
+      constraints,
+      expectedRevisions: { chatgpt: expectedRevisions.chatgpt, claude: expectedRevisions.claude },
+    };
   }
 
   if (value.type === 'check-provider-page') {
@@ -240,7 +277,17 @@ export function parseHostMessage(value: unknown): HostMessage | null {
     return null;
   }
   const { snapshot } = value;
-  if (value.type === 'snapshot' && isRecord(snapshot) && snapshot.mode === 'simulation') {
+  if (
+    value.type === 'snapshot' &&
+    isRecord(snapshot) &&
+    (snapshot.mode === null || isExecutionMode(snapshot.mode)) &&
+    Array.isArray(snapshot.participants) &&
+    Array.isArray(snapshot.liveParticipants)
+  ) {
+    return value as unknown as HostMessage;
+  }
+  const { readiness } = value;
+  if (value.type === 'live-readiness' && isRecord(readiness) && Array.isArray(readiness.providers)) {
     return value as unknown as HostMessage;
   }
   const { connections } = value;
@@ -255,6 +302,18 @@ export function parseHostMessage(value: unknown): HostMessage | null {
     return value as unknown as HostMessage;
   }
   return null;
+}
+
+function isTopic(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= MAX_TOPIC_LENGTH;
+}
+
+function isConstraintList(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.length <= MAX_CONSTRAINTS &&
+    value.every((c): c is string => typeof c === 'string' && c.length <= MAX_CONSTRAINT_LENGTH)
+  );
 }
 
 function isNonEmptyString(value: unknown): value is string {

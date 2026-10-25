@@ -5,6 +5,7 @@
  */
 import type {
   BrowserTabId,
+  OperationId,
   ConnectionRegistry,
   ContributionOrigin,
   ContributionRequest,
@@ -29,6 +30,15 @@ export type ProviderResult =
   | {
       readonly ok: false;
       readonly error: { readonly message: string };
+      /**
+       * What is known about the provider's side of the request:
+       * - `failed` (the default): the provider certainly did not produce a
+       *   contribution; the debate stops;
+       * - `unknown`: the request may have been acted on (for example, a message
+       *   was submitted and the response timed out). The operation becomes
+       *   uncertain and is never retried without explicit human approval.
+       */
+      readonly outcome?: 'failed' | 'unknown';
     };
 
 export interface ProviderCallOptions {
@@ -220,3 +230,121 @@ export type ProviderProbeResult =
 export interface ProviderPageTransport {
   probe(tabId: BrowserTabId, provider: ConversationProviderId): Promise<ProviderProbeResult>;
 }
+
+// ---------------------------------------------------------------------------
+// Live provider adapters (live debate execution foundation)
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether automated interaction through an adapter's route is permitted by
+ * the provider. This is a declaration made by the adapter's author about a
+ * documented, supported route (for example, an official API used under its
+ * terms). Technical access to a page is never evidence of authorization.
+ */
+export type AutomationAuthorization =
+  | { readonly kind: 'authorized'; readonly basis: string }
+  | { readonly kind: 'not-authorized'; readonly reason: string };
+
+export type AdapterCapability =
+  | { readonly status: 'available' }
+  | { readonly status: 'unavailable'; readonly reason: string };
+
+/** What an adapter can do for one target right now. Never inferred from a page probe. */
+export interface LiveAdapterCapabilities {
+  readonly submission: AdapterCapability;
+  readonly responseAcquisition: AdapterCapability;
+}
+
+/** The verified conversation a live operation is aimed at. */
+export interface LiveConversationTarget {
+  readonly provider: ConversationProviderId;
+  readonly tabId: BrowserTabId;
+  /** Always a saved conversation: live operations are never aimed at a pending new chat. */
+  readonly conversationId: string;
+  /** Content script instance that answered the latest probe. It changes with every document load. */
+  readonly pageInstanceId: string;
+}
+
+export interface LiveSubmission {
+  /** Stable per session, round, participant and attempt. Adapters should use it as an idempotency key. */
+  readonly operationId: OperationId;
+  readonly text: string;
+}
+
+/** Proof that the adapter handed a message to the provider. */
+export interface SubmissionReceipt {
+  readonly operationId: OperationId;
+  readonly conversationId: string;
+  readonly pageInstanceId: string;
+  /** Adapter-specific identifier of the submitted message. */
+  readonly submissionId: string;
+}
+
+export interface LiveResponse {
+  readonly operationId: OperationId;
+  readonly conversationId: string;
+  readonly pageInstanceId: string;
+  readonly submissionId: string;
+  readonly content: string;
+}
+
+/**
+ * - `not-authorized`, `unsupported`: the route does not permit or support the operation;
+ * - `target-changed`: the conversation or document is no longer the one the operation was aimed at;
+ * - `busy`: another submission to the same conversation is in progress;
+ * - `timeout`: no result in time (the outcome is always `unknown`);
+ * - `provider-error`: the provider reported an error;
+ * - `invalid-response`: the result was malformed or belonged to another operation;
+ * - `transport-error`: any other failure to reach the provider.
+ */
+export type LiveFailureKind =
+  | 'not-authorized'
+  | 'unsupported'
+  | 'target-changed'
+  | 'busy'
+  | 'timeout'
+  | 'provider-error'
+  | 'invalid-response'
+  | 'transport-error';
+
+/** As for `TransportFailure`, `outcome: 'unknown'` means the provider may have acted on the operation. */
+export interface LiveFailure {
+  readonly kind: LiveFailureKind;
+  readonly outcome: 'not-performed' | 'unknown';
+  readonly message: string;
+}
+
+export type SubmissionResult =
+  | { readonly ok: true; readonly receipt: SubmissionReceipt }
+  | { readonly ok: false; readonly failure: LiveFailure };
+
+export type ResponseResult =
+  | { readonly ok: true; readonly response: LiveResponse }
+  | { readonly ok: false; readonly failure: LiveFailure };
+
+export interface LiveCallOptions {
+  readonly signal: AbortSignal;
+}
+
+/**
+ * Provider-specific route for submitting a debate message to a linked
+ * conversation and acquiring the provider's response. Implementations keep
+ * browser and network details behind this port, must not throw, and must
+ * only implement routes the provider has authorized for automated use.
+ */
+export interface LiveProviderAdapter {
+  readonly provider: ConversationProviderId;
+  readonly route: { readonly id: string; readonly label: string };
+  readonly authorization: AutomationAuthorization;
+  capabilities(target: LiveConversationTarget): Promise<LiveAdapterCapabilities>;
+  /** Submits one message. Must not retry on its own: a retry of an uncertain submission is a human decision. */
+  submit(target: LiveConversationTarget, submission: LiveSubmission, options: LiveCallOptions): Promise<SubmissionResult>;
+  /** Waits for the provider's response to a submission. */
+  awaitResponse(
+    target: LiveConversationTarget,
+    receipt: SubmissionReceipt,
+    options: LiveCallOptions,
+  ): Promise<ResponseResult>;
+}
+
+export type LiveAdapterRegistry = Readonly<Partial<Record<ConversationProviderId, LiveProviderAdapter>>>;

@@ -13,13 +13,13 @@ export const CHECKPOINT_KEY = 'thirdmind.checkpoint.v1';
  * provider conversations.
  */
 export function createSessionCheckpointStore<TSetup>(
-  isSetup: (value: unknown) => value is TSetup,
+  /** Validates the stored setup and returns it in its current shape, or `null` to discard the checkpoint. */
+  parseSetup: (value: unknown) => TSetup | null,
 ): CheckpointStore<TSetup> {
   return {
     async load() {
       const stored: Record<string, unknown> = await browser.storage.session.get(CHECKPOINT_KEY);
-      const value = stored[CHECKPOINT_KEY];
-      return isCheckpoint(value, isSetup) ? value : null;
+      return parseCheckpoint(stored[CHECKPOINT_KEY], parseSetup);
     },
     async save(checkpoint) {
       await browser.storage.session.set({ [CHECKPOINT_KEY]: checkpoint });
@@ -34,18 +34,17 @@ export function createSessionCheckpointStore<TSetup>(
  * Structural check of the envelope only. The checkpoint is written exclusively
  * by this extension, so the session payload is not re-validated field by field.
  */
-function isCheckpoint<TSetup>(
+function parseCheckpoint<TSetup>(
   value: unknown,
-  isSetup: (value: unknown) => value is TSetup,
-): value is DebateCheckpoint<TSetup> {
+  parseSetup: (value: unknown) => TSetup | null,
+): DebateCheckpoint<TSetup> | null {
   if (typeof value !== 'object' || value === null) {
-    return false;
+    return null;
   }
   const candidate = value as Partial<Record<keyof DebateCheckpoint<TSetup>, unknown>>;
-  return (
-    candidate.version === 1 &&
-    typeof candidate.session === 'object' &&
-    candidate.session !== null &&
-    isSetup(candidate.setup)
-  );
+  if (candidate.version !== 1 || typeof candidate.session !== 'object' || candidate.session === null) {
+    return null;
+  }
+  const setup = parseSetup(candidate.setup);
+  return setup === null ? null : { version: 1, session: candidate.session as DebateCheckpoint<TSetup>['session'], setup };
 }

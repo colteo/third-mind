@@ -34,16 +34,27 @@ export function operationLabel(operation: ProviderOperation | undefined): string
     case 'pending':
       return 'Queued';
     case 'dispatched':
-      return 'Waiting for the simulated response…';
+      return 'Waiting for the response…';
     case 'acknowledged':
       return 'Received';
     case 'failed':
       return `Failed: ${operation.error}`;
     case 'uncertain':
-      return 'Uncertain: interrupted by a background restart';
+      return `Uncertain: ${uncertaintyReason(operation)}`;
     case 'superseded':
       return 'Superseded by a new attempt';
   }
+}
+
+/** Why an uncertain operation's outcome is unknown. */
+export function uncertaintyReason(operation: ProviderOperation): string {
+  if (operation.status !== 'uncertain') {
+    return '';
+  }
+  if (operation.cause === 'unknown-outcome') {
+    return operation.detail ?? 'the participant could not confirm whether the request was acted on';
+  }
+  return 'interrupted by a background restart';
 }
 
 export function formatTime(timestamp: string): string {

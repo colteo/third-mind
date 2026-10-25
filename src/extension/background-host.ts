@@ -1,22 +1,26 @@
 import { browser, type Browser } from 'wxt/browser';
 import {
+  LIVE_PARTICIPANTS,
   buildConnectionsView,
   createConnectionCoordinator,
   createDebateRunner,
+  createLivePreflight,
+  createLiveProviders,
+  createSubmissionLocks,
+  prepareLiveStart,
+  verifyLiveContinuation,
   type ConnectionCoordinator,
   type DebateRunner,
+  type LivePreflight,
+  type LivePreflightResult,
   type RunnerResult,
 } from '../application';
 import { DEFAULT_CONFIGURATION } from '../domain';
-import {
-  SIMULATION_PARTICIPANTS,
-  createSimulatedProviders,
-  delaysForPace,
-  isSimulationSetup,
-  type SimulationSetup,
-} from '../infrastructure/simulator';
+import { createConsumerSiteAdapters } from '../infrastructure/live/consumer-site-adapters';
+import { SIMULATION_PARTICIPANTS, createSimulatedProviders, delaysForPace } from '../infrastructure/simulator';
 import { createConversationRecognizer } from '../infrastructure/conversation-urls';
 import { createChromeTabSource, watchTabEvents } from './chrome-tabs';
+import { parseDebateSetup, type DebateSetup } from './debate-setup';
 import {
   SIDE_PANEL_PORT_NAME,
   isConnectionMessage,
@@ -24,6 +28,7 @@ import {
   type ClientMessage,
   type ConnectionClientMessage,
   type HostMessage,
+  type LiveClientMessage,
   type PageCheckClientMessage,
 } from './protocol';
 import { createProviderTransport, type ProviderTransport } from './provider-transport';
@@ -53,19 +58,18 @@ type Port = Browser.runtime.Port;
  * debate and of the link state: a page check never changes a link, and the
  * debate still uses the simulators. See docs/architecture/provider-transport.md.
  *
+ * Live debates (live execution foundation) use the same runner. The session
+ * setup records the execution mode, and `createProviders` builds simulators
+ * for simulation sessions and live providers for live sessions, never one in
+ * place of the other. Live providers reach ChatGPT and Claude only through the
+ * live adapters registered here. The shipped adapters for the two websites
+ * declare that no authorized automation route exists, so the live preflight
+ * never reports ready and no live debate can start. See
+ * docs/architecture/live-execution.md.
+ *
  * All listeners are registered synchronously, as MV3 requires.
  */
 export function startBackgroundHost(): void {
-  const runner = createDebateRunner<SimulationSetup>({
-    clock: systemClock,
-    ids: randomIds,
-    checkpoints: createSessionCheckpointStore(isSimulationSetup),
-    createProviders: (setup) => createSimulatedProviders(setup.scenario, delaysForPace(setup.pace)),
-    reportError: (error) => {
-      console.error('[ThirdMind]', error);
-    },
-  });
-
   const recognizer = createConversationRecognizer();
   const connections = createConnectionCoordinator({
     tabs: createChromeTabSource(browser.tabs),
@@ -82,6 +86,28 @@ export function startBackgroundHost(): void {
     extensionId: browser.runtime.id,
     recognizer,
     ids: randomIds,
+  });
+
+  // An authorized integration replaces these adapters; nothing else in this file changes.
+  const liveAdapters = createConsumerSiteAdapters();
+  const preflight = createLivePreflight({ connections, transport, adapters: liveAdapters, clock: systemClock });
+  const submissionLocks = createSubmissionLocks();
+
+  const runner = createDebateRunner<DebateSetup>({
+    clock: systemClock,
+    ids: randomIds,
+    checkpoints: createSessionCheckpointStore(parseDebateSetup),
+    createProviders: (setup) =>
+      setup.mode === 'simulation'
+        ? createSimulatedProviders(setup.scenario, delaysForPace(setup.pace))
+        : createLiveProviders(setup, {
+            adapters: liveAdapters,
+            verifyTarget: (binding) => preflight.verifyTarget(binding),
+            locks: submissionLocks,
+          }),
+    reportError: (error) => {
+      console.error('[ThirdMind]', error);
+    },
   });
 
   const ports = new Set<Port>();
@@ -140,11 +166,13 @@ export function startBackgroundHost(): void {
         post(port, { type: 'command-rejected', command: 'unknown', reason: 'The message was not understood.' });
       } else if (message.type === 'check-provider-page') {
         void handlePageCheck(connections, transport, ports, port, message);
+      } else if (message.type === 'check-live-readiness' || message.type === 'start-live') {
+        void ready.then(() => handleLiveMessage(runner, preflight, ports, port, message));
       } else if (isConnectionMessage(message)) {
         // The coordinator queues commands behind its own initialization.
         void handleConnectionMessage(connections, port, message);
       } else {
-        void ready.then(() => handleMessage(runner, port, message));
+        void ready.then(() => handleMessage(runner, preflight, ports, port, message));
       }
     });
     void ready.then(() => {
@@ -163,7 +191,7 @@ export function startBackgroundHost(): void {
   });
 }
 
-type DebateClientMessage = Exclude<ClientMessage, ConnectionClientMessage | PageCheckClientMessage>;
+type DebateClientMessage = Exclude<ClientMessage, ConnectionClientMessage | PageCheckClientMessage | LiveClientMessage>;
 
 /**
  * Checks the page connection of the provider's linked tab. The links are
@@ -205,14 +233,64 @@ async function handlePageCheck(
   }
 }
 
+/**
+ * Live preflight and live start. The preflight runs again for every start, against the link revisions the
+ * panel displayed, and its result goes to every panel, so each one shows why a live debate can or cannot start.
+ */
+async function handleLiveMessage(
+  runner: DebateRunner<DebateSetup>,
+  preflight: LivePreflight,
+  ports: ReadonlySet<Port>,
+  port: Port,
+  message: LiveClientMessage,
+): Promise<void> {
+  try {
+    if (message.type === 'check-live-readiness') {
+      broadcastReadiness(ports, await preflight.run());
+      return;
+    }
+    const gate = await prepareLiveStart(preflight, message.expectedRevisions);
+    broadcastReadiness(ports, gate.preflight);
+    const result: RunnerResult = gate.ok
+      ? await runner.start({
+          topic: message.topic,
+          constraints: message.constraints,
+          participants: LIVE_PARTICIPANTS,
+          configuration: DEFAULT_CONFIGURATION,
+          setup: gate.setup,
+        })
+      : gate;
+    if (!result.ok) {
+      post(port, { type: 'command-rejected', command: message.type, reason: result.reason });
+      post(port, snapshotMessage(runner));
+    }
+  } catch (error) {
+    console.error('[ThirdMind] Live debate:', error);
+    post(port, {
+      type: 'command-rejected',
+      command: message.type,
+      reason: 'An internal error occurred. See the service worker console for details.',
+    });
+  }
+}
+
+function broadcastReadiness(ports: ReadonlySet<Port>, readiness: LivePreflightResult): void {
+  const message: HostMessage = { type: 'live-readiness', readiness };
+  for (const target of ports) {
+    post(target, message);
+  }
+}
+
 async function handleMessage(
-  runner: DebateRunner<SimulationSetup>,
+  runner: DebateRunner<DebateSetup>,
+  preflight: LivePreflight,
+  ports: ReadonlySet<Port>,
   port: Port,
   message: DebateClientMessage,
 ): Promise<void> {
   let result: RunnerResult;
   try {
-    result = await dispatch(runner, message);
+    result = await dispatch(runner, preflight, ports, message);
   } catch (error) {
     console.error('[ThirdMind]', error);
     result = { ok: false, reason: 'An internal error occurred. See the service worker console for details.' };
@@ -224,7 +302,12 @@ async function handleMessage(
   }
 }
 
-function dispatch(runner: DebateRunner<SimulationSetup>, message: DebateClientMessage): Promise<RunnerResult> {
+async function dispatch(
+  runner: DebateRunner<DebateSetup>,
+  preflight: LivePreflight,
+  ports: ReadonlySet<Port>,
+  message: DebateClientMessage,
+): Promise<RunnerResult> {
   switch (message.type) {
     case 'start':
       return runner.start({
@@ -232,19 +315,42 @@ function dispatch(runner: DebateRunner<SimulationSetup>, message: DebateClientMe
         constraints: message.constraints,
         participants: SIMULATION_PARTICIPANTS,
         configuration: DEFAULT_CONFIGURATION,
-        setup: { scenario: message.scenario, pace: message.pace },
+        setup: { mode: 'simulation', scenario: message.scenario, pace: message.pace },
       });
     case 'pause':
       return runner.pause(message.sessionId);
     case 'resume':
-      return runner.resume(message.sessionId);
+      return (await liveContinuationBlocked(runner, preflight, ports, message.sessionId)) ?? runner.resume(message.sessionId);
     case 'add-constraint':
       return runner.addConstraint(message.content, message.sessionId);
     case 'reissue-operation':
-      return runner.reissueUncertainOperation(message.operationId, message.sessionId);
+      return (
+        (await liveContinuationBlocked(runner, preflight, ports, message.sessionId)) ??
+        runner.reissueUncertainOperation(message.operationId, message.sessionId)
+      );
     case 'reset':
       return runner.reset(message.sessionId);
   }
+}
+
+/**
+ * A live session sends messages again when it resumes or re-issues an uncertain operation, so both need a
+ * fresh preflight against the conversations it was started with. Returns `null` when the action may proceed:
+ * for every simulated session, and for a command aimed at another session (the runner rejects it itself).
+ */
+async function liveContinuationBlocked(
+  runner: DebateRunner<DebateSetup>,
+  preflight: LivePreflight,
+  ports: ReadonlySet<Port>,
+  sessionId: string,
+): Promise<RunnerResult | null> {
+  const { session, setup } = runner.getSnapshot();
+  if (setup?.mode !== 'live' || session?.id !== sessionId) {
+    return null;
+  }
+  const gate = await verifyLiveContinuation(preflight, setup);
+  broadcastReadiness(ports, gate.preflight);
+  return gate.ok ? null : gate;
 }
 
 async function handleConnectionMessage(
@@ -291,16 +397,17 @@ function connectionsMessage(connections: ConnectionCoordinator): HostMessage {
   return { type: 'connections', connections: buildConnectionsView(connections.getSnapshot()) };
 }
 
-function snapshotMessage(runner: DebateRunner<SimulationSetup>): HostMessage {
+function snapshotMessage(runner: DebateRunner<DebateSetup>): HostMessage {
   const { session, setup } = runner.getSnapshot();
   return {
     type: 'snapshot',
     snapshot: {
-      mode: 'simulation',
+      mode: session === null ? null : (setup?.mode ?? null),
       participants: SIMULATION_PARTICIPANTS,
+      liveParticipants: LIVE_PARTICIPANTS,
       session,
-      scenario: setup?.scenario ?? null,
-      pace: setup?.pace ?? null,
+      scenario: setup?.mode === 'simulation' ? setup.scenario : null,
+      pace: setup?.mode === 'simulation' ? setup.pace : null,
     },
   };
 }
