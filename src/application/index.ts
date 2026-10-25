@@ -33,5 +33,7 @@ export {
   type ConnectionsView,
   type ConversationCandidate,
   type LinkedConversationView,
+  type LinkedIdentityView,
+  type NewChatCandidate,
   type ProviderConnectionsView,
 } from './connection-view';

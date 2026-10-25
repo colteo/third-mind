@@ -1,10 +1,14 @@
 import {
   CONVERSATION_PROVIDERS,
   isSameConversation,
-  tabShowsLinkedConversation,
+  linkStatus,
+  tabShowsLinkTarget,
   type BrowserTabId,
-  type ConnectionState,
+  type ConfirmationReason,
+  type ConversationIdentity,
   type ConversationProviderId,
+  type IdentitySource,
+  type LinkStatus,
 } from '../domain';
 import type { ConnectionsSnapshot } from './connection-coordinator';
 
@@ -15,8 +19,8 @@ import type { ConnectionsSnapshot } from './connection-coordinator';
 
 /**
  * - `available`: can be linked;
- * - `linked`: the tab of a healthy link;
- * - `reconnectable`: shows the conversation of a stale, disconnected or unavailable link.
+ * - `linked`: the tab of the current link, showing what the link expects;
+ * - `reconnectable`: shows the saved conversation of a stale, disconnected or unavailable link.
  */
 export type CandidateStatus = 'available' | 'linked' | 'reconnectable';
 
@@ -27,11 +31,24 @@ export interface ConversationCandidate {
   readonly status: CandidateStatus;
 }
 
+/** An open new-chat page. It has no conversation identifier, so it can never be reconnectable. */
+export interface NewChatCandidate {
+  readonly tabId: BrowserTabId;
+  readonly title: string | null;
+  readonly status: Exclude<CandidateStatus, 'reconnectable'>;
+}
+
+/** The link's identity without URLs. */
+export type LinkedIdentityView =
+  | { readonly kind: 'saved'; readonly conversationId: string; readonly source: IdentitySource }
+  | { readonly kind: 'pending' }
+  | { readonly kind: 'unconfirmed'; readonly conversationId: string; readonly reason: ConfirmationReason };
+
 export interface LinkedConversationView {
   readonly tabId: BrowserTabId;
-  readonly conversationId: string;
-  readonly state: ConnectionState;
-  /** Current tab title, only while the tab still shows the linked conversation. */
+  readonly identity: LinkedIdentityView;
+  readonly status: LinkStatus;
+  /** Current tab title, only while the tab still shows what the link expects. */
   readonly title: string | null;
 }
 
@@ -40,9 +57,11 @@ export interface ProviderConnectionsView {
   /** Slot revision; sent back with every command so outdated views are rejected. */
   readonly revision: number;
   readonly link: LinkedConversationView | null;
-  /** Open conversations of this provider, in tab order. */
+  /** Open saved conversations of this provider, in tab order. */
   readonly candidates: readonly ConversationCandidate[];
-  /** Open tabs of this provider that do not show a recognized conversation (home page, new chat). */
+  /** Open new-chat pages of this provider, in tab order. */
+  readonly newChats: readonly NewChatCandidate[];
+  /** Open tabs of this provider that show neither a saved conversation nor a new chat (settings, projects). */
   readonly otherPageCount: number;
 }
 
@@ -63,29 +82,44 @@ export function buildConnectionsView({ registry, discovery }: ConnectionsSnapsho
     providers: CONVERSATION_PROVIDERS.map((provider): ProviderConnectionsView => {
       const { revision, link } = registry[provider];
       const candidates: ConversationCandidate[] = [];
+      const newChats: NewChatCandidate[] = [];
       let otherPageCount = 0;
       let linkTitle: string | null = null;
       for (const tab of tabs) {
         const { classification } = tab;
-        if (classification.kind === 'provider-page' && classification.provider === provider) {
-          otherPageCount += 1;
-        }
-        if (classification.kind !== 'conversation' || classification.conversation.provider !== provider) {
-          continue;
-        }
-        const { conversation } = classification;
-        let status: CandidateStatus = 'available';
-        if (link !== null && isSameConversation(link, conversation)) {
-          if (link.state.kind !== 'linked') {
-            status = 'reconnectable';
-          } else if (link.tabId === tab.tabId) {
-            status = 'linked';
-          }
-        }
-        if (link !== null && link.tabId === tab.tabId && tabShowsLinkedConversation(link, tab)) {
+        const showsLinkTarget = link !== null && link.tabId === tab.tabId && tabShowsLinkTarget(link, tab);
+        if (showsLinkTarget) {
           linkTitle = tab.title;
         }
-        candidates.push({ tabId: tab.tabId, conversationId: conversation.conversationId, title: tab.title, status });
+        // A stale or disconnected link's former tab can be selected again like any other tab.
+        const isLinkTab = showsLinkTarget && link.state.kind === 'linked';
+        switch (classification.kind) {
+          case 'provider-page':
+            if (classification.provider === provider) {
+              otherPageCount += 1;
+            }
+            break;
+          case 'new-chat':
+            if (classification.provider === provider) {
+              newChats.push({ tabId: tab.tabId, title: tab.title, status: isLinkTab ? 'linked' : 'available' });
+            }
+            break;
+          case 'conversation': {
+            const { conversation } = classification;
+            if (conversation.provider !== provider) {
+              break;
+            }
+            let status: CandidateStatus = isLinkTab ? 'linked' : 'available';
+            if (link !== null && isSameConversation(link, conversation) && link.state.kind !== 'linked') {
+              status = 'reconnectable';
+            }
+            candidates.push({ tabId: tab.tabId, conversationId: conversation.conversationId, title: tab.title, status });
+            break;
+          }
+          case 'unsupported':
+          case 'unavailable':
+            break;
+        }
       }
       return {
         provider,
@@ -93,10 +127,22 @@ export function buildConnectionsView({ registry, discovery }: ConnectionsSnapsho
         link:
           link === null
             ? null
-            : { tabId: link.tabId, conversationId: link.conversationId, state: link.state, title: linkTitle },
+            : { tabId: link.tabId, identity: identityView(link.identity), status: linkStatus(link), title: linkTitle },
         candidates,
+        newChats,
         otherPageCount,
       };
     }),
   };
+}
+
+function identityView(identity: ConversationIdentity): LinkedIdentityView {
+  switch (identity.kind) {
+    case 'saved':
+      return { kind: 'saved', conversationId: identity.conversationId, source: identity.source };
+    case 'pending':
+      return { kind: 'pending' };
+    case 'unconfirmed':
+      return { kind: 'unconfirmed', conversationId: identity.conversationId, reason: identity.reason };
+  }
 }

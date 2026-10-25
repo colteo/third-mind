@@ -744,6 +744,19 @@ textarea[aria-invalid='true'] {
   background: var(--color-warning-bg);
 }
 
+.connection-awaiting-identity {
+  border-color: var(--color-info-text);
+  border-style: dashed;
+  color: var(--color-info-text);
+  background: var(--color-info-bg);
+}
+
+.connection-confirmation-required {
+  border-color: var(--color-warning-text);
+  color: var(--color-warning-text);
+  background: var(--color-warning-bg);
+}
+
 .connection-stale,
 .connection-disconnected {
   border-color: var(--color-error-text);
@@ -782,7 +795,21 @@ textarea[aria-invalid='true'] {
   color: var(--color-error-text);
 }
 
-.connection-detail-unavailable {
+.connection-detail-unavailable,
+.connection-detail-confirmation-required {
+  color: var(--color-warning-text);
+}
+
+/* Page check result (Phase 2.2B foundation). */
+.page-check {
+  font-size: 0.875rem;
+  overflow-wrap: anywhere;
+}
+
+.page-check-loading,
+.page-check-composer-missing,
+.page-check-not-a-chat-page,
+.page-check-failed {
   color: var(--color-warning-text);
 }
 
@@ -817,4 +844,22 @@ textarea[aria-invalid='true'] {
 
 .candidates .button-row {
   margin-top: var(--space-2);
+}
+
+.candidate-group + .candidate-group {
+  margin-top: var(--space-2);
+}
+
+.candidate-group-title {
+  margin: 0 0 var(--space-1);
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-muted);
+}
+
+.new-chat-badge {
+  border-style: dashed;
+  margin-right: var(--space-1);
 }

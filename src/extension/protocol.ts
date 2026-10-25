@@ -3,6 +3,7 @@ import {
   MAX_CONSTRAINT_LENGTH,
   MAX_CONSTRAINTS,
   MAX_TOPIC_LENGTH,
+  isConversationId,
   isConversationProviderId,
   isRevision,
   isTabId,
@@ -17,6 +18,7 @@ import {
   type SimulationPaceId,
   type SimulationScenarioId,
 } from '../infrastructure/simulator/scenarios';
+import type { ProviderProbeResult } from '../ports';
 
 /**
  * Typed messages exchanged between the side panel (client) and the background
@@ -45,17 +47,35 @@ export type ClientMessage =
   | { readonly type: 'add-constraint'; readonly sessionId: SessionId; readonly content: string }
   | { readonly type: 'reissue-operation'; readonly sessionId: SessionId; readonly operationId: string }
   | { readonly type: 'reset'; readonly sessionId: SessionId }
-  | ConnectionClientMessage;
+  | ConnectionClientMessage
+  | PageCheckClientMessage;
 
 /**
- * Conversation link commands (Phase 2.1). They never touch the debate.
- * Each command that changes a link carries the slot `expectedRevision` the
- * panel displayed, so a stale panel cannot overwrite a newer connection state.
+ * Conversation link commands (Phase 2.1, new chats Phase 2.2A). They never
+ * touch the debate. Each command that changes a link carries the slot
+ * `expectedRevision` the panel displayed, so a stale panel cannot overwrite a
+ * newer connection state. Tab ids and conversation ids sent by the panel are
+ * only claims: the host rechecks them against a fresh tab scan. The panel
+ * never sends URLs.
  */
 export type ConnectionClientMessage =
   | { readonly type: 'refresh-connections' }
   | {
       readonly type: 'link-conversation';
+      readonly provider: ConversationProviderId;
+      readonly tabId: number;
+      readonly conversationId: string;
+      readonly expectedRevision: number;
+    }
+  | {
+      readonly type: 'link-new-chat';
+      readonly provider: ConversationProviderId;
+      readonly tabId: number;
+      readonly expectedRevision: number;
+    }
+  | {
+      /** Accepts the conversation the linked new chat's tab now shows. */
+      readonly type: 'confirm-conversation-identity';
       readonly provider: ConversationProviderId;
       readonly tabId: number;
       readonly conversationId: string;
@@ -69,18 +89,35 @@ export type ConnectionClientMessage =
     }
   | { readonly type: 'disconnect-conversation'; readonly provider: ConversationProviderId; readonly expectedRevision: number };
 
-export type ClientMessageType = ClientMessage['type'];
+/**
+ * Asks the host to check the page connection of the provider's linked tab
+ * (Phase 2.2B foundation). The panel names only the provider: the host takes
+ * the tab from the current link, so the panel cannot aim the transport at an
+ * arbitrary tab, and nothing it sends is ever executed by a page.
+ */
+export interface PageCheckClientMessage {
+  readonly type: 'check-provider-page';
+  readonly provider: ConversationProviderId;
+}
 
-/** Longest conversation identifier accepted from a client. Recognized identifiers are UUIDs (36 characters). */
-export const MAX_CONVERSATION_ID_LENGTH = 128;
+export type ClientMessageType = ClientMessage['type'];
 
 export function isConnectionMessage(message: ClientMessage): message is ConnectionClientMessage {
   return (
     message.type === 'refresh-connections' ||
     message.type === 'link-conversation' ||
+    message.type === 'link-new-chat' ||
+    message.type === 'confirm-conversation-identity' ||
     message.type === 'reconnect-conversation' ||
     message.type === 'disconnect-conversation'
   );
+}
+
+/** The result of a page check, for the tab that was linked when the check ran. */
+export interface PageCheckView {
+  readonly provider: ConversationProviderId;
+  readonly tabId: number;
+  readonly result: ProviderProbeResult;
 }
 
 export interface HostSnapshot {
@@ -99,6 +136,7 @@ export interface HostSnapshot {
 export type HostMessage =
   | { readonly type: 'snapshot'; readonly snapshot: HostSnapshot }
   | { readonly type: 'connections'; readonly connections: ConnectionsView }
+  | { readonly type: 'page-check'; readonly check: PageCheckView }
   | { readonly type: 'command-rejected'; readonly command: ClientMessageType | 'unknown'; readonly reason: string };
 
 export function parseClientMessage(value: unknown): ClientMessage | null {
@@ -119,6 +157,10 @@ export function parseClientMessage(value: unknown): ClientMessage | null {
       return null;
     }
     return { type: 'start', topic, constraints, scenario, pace };
+  }
+
+  if (value.type === 'check-provider-page') {
+    return isConversationProviderId(value.provider) ? { type: 'check-provider-page', provider: value.provider } : null;
   }
 
   const connectionMessage = parseConnectionMessage(value);
@@ -162,9 +204,19 @@ function parseConnectionMessage(value: Record<string, unknown>): ConnectionClien
       return isConversationProviderId(provider) &&
         isTabId(tabId) &&
         isRevision(expectedRevision) &&
-        isNonEmptyString(conversationId) &&
-        conversationId.length <= MAX_CONVERSATION_ID_LENGTH
+        isConversationId(conversationId)
         ? { type: 'link-conversation', provider, tabId, conversationId, expectedRevision }
+        : null;
+    case 'link-new-chat':
+      return isConversationProviderId(provider) && isTabId(tabId) && isRevision(expectedRevision)
+        ? { type: 'link-new-chat', provider, tabId, expectedRevision }
+        : null;
+    case 'confirm-conversation-identity':
+      return isConversationProviderId(provider) &&
+        isTabId(tabId) &&
+        isRevision(expectedRevision) &&
+        isConversationId(conversationId)
+        ? { type: 'confirm-conversation-identity', provider, tabId, conversationId, expectedRevision }
         : null;
     case 'reconnect-conversation':
       return isConversationProviderId(provider) && isTabId(tabId) && isRevision(expectedRevision)
@@ -193,6 +245,10 @@ export function parseHostMessage(value: unknown): HostMessage | null {
   }
   const { connections } = value;
   if (value.type === 'connections' && isRecord(connections) && Array.isArray(connections.providers)) {
+    return value as unknown as HostMessage;
+  }
+  const { check } = value;
+  if (value.type === 'page-check' && isRecord(check) && isRecord(check.result)) {
     return value as unknown as HostMessage;
   }
   if (value.type === 'command-rejected' && typeof value.reason === 'string') {

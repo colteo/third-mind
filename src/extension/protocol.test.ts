@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseClientMessage, parseHostMessage } from './protocol';
+import { isConnectionMessage, parseClientMessage, parseHostMessage, type ClientMessage } from './protocol';
 
 describe('client message parsing', () => {
   it('accepts well-formed messages', () => {
@@ -93,6 +93,36 @@ describe('connection message parsing', () => {
     });
   });
 
+  it('accepts new chat and identity confirmation commands, dropping anything the host must not trust', () => {
+    expect(
+      parseClientMessage({
+        type: 'link-new-chat',
+        provider: 'claude',
+        tabId: 4,
+        expectedRevision: 0,
+        // A client cannot supply a URL or invent an identifier for a new chat.
+        url: 'https://claude.ai/chat/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        conversationId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      }),
+    ).toEqual({ type: 'link-new-chat', provider: 'claude', tabId: 4, expectedRevision: 0 });
+    expect(
+      parseClientMessage({
+        type: 'confirm-conversation-identity',
+        provider: 'chatgpt',
+        tabId: 7,
+        conversationId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        expectedRevision: 3,
+        canonicalUrl: 'https://evil.example/',
+      }),
+    ).toEqual({
+      type: 'confirm-conversation-identity',
+      provider: 'chatgpt',
+      tabId: 7,
+      conversationId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      expectedRevision: 3,
+    });
+  });
+
   it.each<[unknown]>([
     [{ type: 'link-conversation', provider: 'gemini', tabId: 1, conversationId: 'a', expectedRevision: 0 }],
     [{ type: 'link-conversation', provider: 'chatgpt', tabId: -1, conversationId: 'a', expectedRevision: 0 }],
@@ -106,6 +136,17 @@ describe('connection message parsing', () => {
     [{ type: 'disconnect-conversation', expectedRevision: 0 }],
     [{ type: 'disconnect-conversation', provider: 'claude', expectedRevision: Number.NaN }],
     [{ type: 'disconnect-conversation', provider: '__proto__', expectedRevision: 0 }],
+    [{ type: 'link-new-chat', provider: 'chatgpt', tabId: 1 }],
+    [{ type: 'link-new-chat', provider: 'chatgpt', expectedRevision: 0 }],
+    [{ type: 'link-new-chat', provider: 'gemini', tabId: 1, expectedRevision: 0 }],
+    [{ type: 'link-new-chat', provider: 'chatgpt', tabId: -3, expectedRevision: 0 }],
+    [{ type: 'link-new-chat', provider: 'chatgpt', tabId: Number.MAX_SAFE_INTEGER + 2, expectedRevision: 0 }],
+    [{ type: 'confirm-conversation-identity', provider: 'chatgpt', tabId: 1, expectedRevision: 0 }],
+    [{ type: 'confirm-conversation-identity', provider: 'chatgpt', tabId: 1, conversationId: '', expectedRevision: 0 }],
+    [{ type: 'confirm-conversation-identity', provider: 'chatgpt', tabId: 1, conversationId: 7, expectedRevision: 0 }],
+    [{ type: 'confirm-conversation-identity', provider: 'chatgpt', tabId: 1, conversationId: 'a'.repeat(129), expectedRevision: 0 }],
+    [{ type: 'confirm-conversation-identity', provider: 'chatgpt', conversationId: 'a', expectedRevision: 0 }],
+    [{ type: 'confirm-conversation-identity', provider: 'claude', tabId: 1, conversationId: 'a', expectedRevision: 1.5 }],
   ])('rejects %j', (value) => {
     expect(parseClientMessage(value)).toBeNull();
   });
@@ -128,5 +169,52 @@ describe('connection message parsing', () => {
         connections: { mode: 'simulation', participants: [], session: null, scenario: null, pace: null },
       }),
     ).toBeNull();
+  });
+});
+
+describe('message routing', () => {
+  it('routes every link command to the connection coordinator and debate commands to the runner', () => {
+    const connection: ClientMessage[] = [
+      { type: 'refresh-connections' },
+      { type: 'link-conversation', provider: 'chatgpt', tabId: 1, conversationId: 'a', expectedRevision: 0 },
+      { type: 'link-new-chat', provider: 'chatgpt', tabId: 1, expectedRevision: 0 },
+      { type: 'confirm-conversation-identity', provider: 'chatgpt', tabId: 1, conversationId: 'a', expectedRevision: 0 },
+      { type: 'reconnect-conversation', provider: 'claude', tabId: 1, expectedRevision: 0 },
+      { type: 'disconnect-conversation', provider: 'claude', expectedRevision: 0 },
+    ];
+    expect(connection.every(isConnectionMessage)).toBe(true);
+    expect(isConnectionMessage({ type: 'pause', sessionId: 's-1' })).toBe(false);
+    // Page checks are handled by the transport, not by the link coordinator.
+    expect(isConnectionMessage({ type: 'check-provider-page', provider: 'claude' })).toBe(false);
+  });
+});
+
+describe('page check messages', () => {
+  it('accepts a page check that names only a provider', () => {
+    expect(parseClientMessage({ type: 'check-provider-page', provider: 'chatgpt' })).toEqual({
+      type: 'check-provider-page',
+      provider: 'chatgpt',
+    });
+    // The panel cannot choose the tab or pass anything to the page: extra fields are dropped.
+    expect(
+      parseClientMessage({ type: 'check-provider-page', provider: 'claude', tabId: 99, code: 'document.body.innerText' }),
+    ).toEqual({ type: 'check-provider-page', provider: 'claude' });
+  });
+
+  it.each<[unknown]>([
+    [{ type: 'check-provider-page' }],
+    [{ type: 'check-provider-page', provider: 'gemini' }],
+    [{ type: 'check-provider-page', provider: '__proto__' }],
+  ])('rejects %j', (value) => {
+    expect(parseClientMessage(value)).toBeNull();
+  });
+
+  it('accepts page check results as a separate host message', () => {
+    const message = {
+      type: 'page-check',
+      check: { provider: 'chatgpt', tabId: 1, result: { ok: false, failure: { kind: 'timeout', outcome: 'unknown' } } },
+    };
+    expect(parseHostMessage(message)).toEqual(message);
+    expect(parseHostMessage({ type: 'page-check', check: { provider: 'chatgpt', tabId: 1 } })).toBeNull();
   });
 });

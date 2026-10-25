@@ -9,16 +9,18 @@ The reasoning behind this structure is recorded in [ADR 0001](../adr/0001-modula
 ```text
 src/
 ├── domain/            Pure debate model (types, events, commands, evolve, decide, stopping policy) and conversation link model
-├── ports/             Interfaces for external capabilities (providers, checkpoints, clock, ids, tabs, URL recognition, connection store)
+├── ports/             Interfaces for external capabilities (providers, checkpoints, clock, ids, tabs, URL recognition, connection store, page transport)
 ├── application/       Debate runner and connection coordinator (imperative shells), read models
 ├── infrastructure/
 │   ├── simulator/     Deterministic GPT and Claude simulators (temporary, Phase 1)
 │   ├── conversation-urls.ts        Provider URL rules (Phase 2.1)
+│   ├── provider-pages.ts           Provider page readiness rules (Phase 2.2B foundation)
 │   ├── memory-connection-store.ts
 │   └── memory-checkpoint-store.ts
-├── extension/         Chrome integration: protocol, background host, side panel client, storage and Tabs API adapters
+├── extension/         Chrome integration: protocol, background host, side panel client, storage and Tabs API adapters,
+│                      provider transport (worker side) and provider content script
 ├── ui/                React side panel interface
-├── entrypoints/       WXT entrypoints (background service worker, side panel page)
+├── entrypoints/       WXT entrypoints (background service worker, side panel page, ChatGPT and Claude content scripts)
 └── test-support/      Test fixtures (not shipped, excluded from coverage)
 ```
 
@@ -29,10 +31,10 @@ WXT expects entrypoints in `src/entrypoints/` (configured via `srcDir: 'src'`). 
 | Module           | Responsibility                                                                                     | May depend on                                                         |
 | ---------------- | -------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
 | `domain`         | Session state, invariants, `evolve(state, event)`, `decide(state)`, stopping policy, request building; conversation link model and transitions | nothing                                                               |
-| `ports`          | `ContributionProvider`, `CheckpointStore`, `Clock`, `IdGenerator`, `TabSource`, `ConversationRecognizer`, `ConnectionStore` | `domain` (types)                                                      |
+| `ports`          | `ContributionProvider`, `CheckpointStore`, `Clock`, `IdGenerator`, `TabSource`, `ConversationRecognizer`, `ConnectionStore`, `ProviderPageTransport` | `domain` (types)                                                      |
 | `application`    | `createDebateRunner` (serializes events, executes commands, persists checkpoints); `createConnectionCoordinator` (tab discovery, reconciliation, link commands); read models | `domain`, `ports`                                                     |
-| `infrastructure` | Port implementations without Chrome: simulator providers, provider URL rules, in-memory stores     | `domain`, `ports`                                                     |
-| `extension`      | Composition root in the service worker; typed messaging; `storage.session` adapters; Tabs API adapter | `domain`, `ports`, `application`, `infrastructure`, `wxt`             |
+| `infrastructure` | Port implementations without Chrome: simulator providers, provider URL rules, provider page readiness rules, in-memory stores | `domain`, `ports`                                                     |
+| `extension`      | Composition root in the service worker; typed messaging; `storage.session` adapters; Tabs API adapter; provider page transport and content script logic | `domain`, `ports`, `application`, `infrastructure`, `wxt`             |
 | `ui`             | Side panel React components                                                                        | `domain`, `application` (read models), `extension` (protocol, client), `infrastructure/simulator/scenarios` (labels only) |
 
 These rules are enforced by `no-restricted-imports` in `eslint.config.js`. In particular, `domain`, `ports`, `application` and `infrastructure` cannot import React, WXT or Chrome APIs.
@@ -67,6 +69,13 @@ Every arrow points toward the domain. The domain depends on nothing.
 │                                             │              │
 │                                   chrome.storage.session   │
 │                                   (operational checkpoint) │
+│                                                            │
+│  chatgpt.com / claude.ai tab (top frame, isolated world)   │
+│  ┌──────────────────────┐ tabs.sendMessage / answer        │
+│  │ provider content     │◄────────────────► service worker │
+│  │ script (readiness    │ runtime.sendMessage (page-hello) │
+│  │ only)                │─────────────────► (transport)    │
+│  └──────────────────────┘                                  │
 └────────────────────────────────────────────────────────────┘
 ```
 
@@ -74,9 +83,11 @@ The debate runs in the background service worker, not in the side panel. Closing
 
 The connection coordinator (Phase 2.1) also runs in the service worker, next to the debate runner but independent of it. It reads open tabs through `chrome.tabs` and stores links in `chrome.storage.session` under its own key. See [conversation-links.md](conversation-links.md).
 
+The provider page transport (Phase 2.2B foundation) runs in the service worker too and talks to small content scripts in the ChatGPT and Claude tabs. It only reads page readiness, is independent of the debate and of the link state, and is wired by the composition root. See [provider-transport.md](provider-transport.md).
+
 ## Replacing the simulator
 
-The simulator implements `ContributionProvider`. A later live adapter (for example, one that talks to a connected ChatGPT tab through a content script) will:
+The simulator implements `ContributionProvider`. A later live adapter (for example, one that talks to a connected ChatGPT tab through the provider page transport) will:
 
 1. implement `ContributionProvider` with `origin: 'live'`;
 2. be registered by the composition root (`extension/background-host.ts`) in `createProviders`;
@@ -89,4 +100,5 @@ The domain and application layers stay unchanged. The operation identifier passe
 - [Debate engine](debate-engine.md): state machine, events, commands, stopping policy, operation lifecycle.
 - [Runtime and recovery](runtime-and-recovery.md): MV3 lifecycle, messaging, checkpoints, reconciliation.
 - [Conversation links](conversation-links.md): Phase 2.1 tab discovery, link lifecycle, permissions.
+- [Provider page transport](provider-transport.md): content scripts, trust boundaries, stale-answer protection, failure outcomes.
 - [Testing](testing.md): test strategy and coverage.

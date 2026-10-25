@@ -9,9 +9,10 @@ WXT generates a Manifest V3 `manifest.json` from `wxt.config.ts` and the entrypo
 | `permissions` | `sidePanel`, `storage`, `tabs`                | Side panel UI; `storage.session` checkpoint and conversation links; reading open tab URLs and titles to discover conversations (Phase 2.1) |
 | `side_panel`  | `default_path: sidepanel.html`                | Generated from `src/entrypoints/sidepanel/`                |
 | `background`  | service worker                                | Generated from `src/entrypoints/background.ts`             |
+| `content_scripts` | `https://chatgpt.com/*` → `content-scripts/chatgpt.js`; `https://claude.ai/*` → `content-scripts/claude.js`; `run_at: document_idle`, top frame only | Generated from `src/entrypoints/*.content.ts` (Phase 2.2B foundation): page readiness only |
 | `action`      | `default_title: Open ThirdMind`               | Clicking the toolbar icon opens the side panel             |
 
-ThirdMind requests no host permissions and has no content scripts. It does not inject scripts, scrape any DOM, access cookies, call private endpoints or send messages to ChatGPT or Claude. The `tabs` permission (Phase 2.1) is used only to read the URL and title of open tabs; see [conversation-links.md](conversation-links.md#permission-tabs).
+ThirdMind requests no host permissions and no `scripting` permission. It does not inject scripts on demand, read conversation content, access cookies, call private endpoints or send messages to ChatGPT or Claude. The `tabs` permission (Phase 2.1) is used only to read the URL and title of open tabs; see [conversation-links.md](conversation-links.md#permission-tabs). The content scripts report only page readiness; see [provider-transport.md](provider-transport.md) and [ADR 0004](../adr/0004-provider-content-script-boundary.md). `wxt dev` adds the two match patterns as host permissions for its development reloader; production builds do not.
 
 ## Where the debate runs
 
@@ -19,8 +20,9 @@ The debate runner lives in the **background service worker** (`src/extension/bac
 
 - it connects to the worker with `runtime.connect({ name: 'thirdmind/side-panel' })`;
 - it sends `ClientMessage` commands (`start`, `pause`, `resume`, `add-constraint`, `reissue-operation`, `reset`);
-- it sends conversation link commands (`refresh-connections`, `link-conversation`, `reconnect-conversation`, `disconnect-conversation`), which the host routes to the connection coordinator, never to the debate runner;
-- it renders `HostMessage` snapshots (debate) and `connections` views (links), which are separate messages, and shows `command-rejected` reasons.
+- it sends conversation link commands (`refresh-connections`, `link-conversation`, `link-new-chat`, `confirm-conversation-identity`, `reconnect-conversation`, `disconnect-conversation`), which the host routes to the connection coordinator, never to the debate runner;
+- it sends `check-provider-page` (Phase 2.2B foundation), which names only a provider; the host checks the tab of that provider's current link through the provider page transport;
+- it renders `HostMessage` snapshots (debate), `connections` views (links) and `page-check` results, which are separate messages, and shows `command-rejected` reasons.
 
 Every command except `start` carries the `sessionId` of the session the panel displayed. The runner checks it inside its serialized queue and rejects commands for any other session, so a stale panel cannot pause, change or discard a newer session. A `reset` for a session that is already gone succeeds without effect. After any rejection the host sends a fresh snapshot so the panel re-syncs.
 
@@ -60,7 +62,11 @@ The worker is kept alive only by ordinary activity: port messages and extension 
 
 ## Conversation links across restarts
 
-Conversation links (Phase 2.1) use the same `storage.session` mechanism under a separate key (`thirdmind.connections.v1`). Tab events are lost while the worker is suspended, so links are reconciled with a fresh tab scan when the worker starts and whenever a panel connects. Details: [conversation-links.md](conversation-links.md#reconciliation-worker-restart-and-panel-reconnection).
+Conversation links (Phase 2.1, new chats Phase 2.2A) use the same `storage.session` mechanism under a separate, versioned key (`thirdmind.connections.v2`; a Phase 2.1 `thirdmind.connections.v1` record is migrated on load). Tab events are lost while the worker is suspended, so links are reconciled with a fresh tab scan when the worker starts and whenever a panel connects. A new chat that received its conversation address while the worker was stopped is never adopted silently: it requires the human's confirmation. Details: [conversation-links.md](conversation-links.md#reconciliation-worker-restart-and-panel-reconnection).
+
+## Provider page transport across restarts
+
+The transport (Phase 2.2B foundation) keeps no persistent state. Its per-tab navigation traces live in memory and are lost when the worker stops; the next operation validates the tab from scratch. Requests in flight when the worker stops are lost together with their answer channel and are never replayed. Content scripts hold no worker state, so they keep answering a restarted worker without a page reload. One-off messages from content scripts (`page-hello`) arrive on `runtime.onMessage`, which is registered synchronously with the other listeners; the side panel never uses one-off messages, only its port. Details: [provider-transport.md](provider-transport.md#lifecycle-and-recovery).
 
 ## Known gaps in recovery (Phase 1)
 

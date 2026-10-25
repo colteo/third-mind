@@ -7,7 +7,7 @@ describe('ChatGPT URL recognition', () => {
   it('recognizes a conversation URL and canonicalizes it', () => {
     expect(classifyUrl(`https://chatgpt.com/c/${ID}`)).toEqual({
       kind: 'conversation',
-      conversation: { provider: 'chatgpt', conversationId: ID, canonicalUrl: `https://chatgpt.com/c/${ID}` },
+      conversation: { provider: 'chatgpt', origin: 'https://chatgpt.com', conversationId: ID, canonicalUrl: `https://chatgpt.com/c/${ID}` },
     });
   });
 
@@ -15,7 +15,7 @@ describe('ChatGPT URL recognition', () => {
     const result = classifyUrl(`HTTPS://ChatGPT.com:443/c/${ID.toUpperCase()}/?model=x#top`);
     expect(result).toEqual({
       kind: 'conversation',
-      conversation: { provider: 'chatgpt', conversationId: ID, canonicalUrl: `https://chatgpt.com/c/${ID}` },
+      conversation: { provider: 'chatgpt', origin: 'https://chatgpt.com', conversationId: ID, canonicalUrl: `https://chatgpt.com/c/${ID}` },
     });
   });
 
@@ -23,7 +23,7 @@ describe('ChatGPT URL recognition', () => {
     const url = `https://chatgpt.com/g/g-p-67ab12cd-research/c/${ID}`;
     expect(classifyUrl(url)).toEqual({
       kind: 'conversation',
-      conversation: { provider: 'chatgpt', conversationId: ID, canonicalUrl: url },
+      conversation: { provider: 'chatgpt', origin: 'https://chatgpt.com', conversationId: ID, canonicalUrl: url },
     });
   });
 });
@@ -32,32 +32,67 @@ describe('Claude URL recognition', () => {
   it('recognizes a conversation URL', () => {
     expect(classifyUrl(`https://claude.ai/chat/${ID}?q=1`)).toEqual({
       kind: 'conversation',
-      conversation: { provider: 'claude', conversationId: ID, canonicalUrl: `https://claude.ai/chat/${ID}` },
+      conversation: { provider: 'claude', origin: 'https://claude.ai', conversationId: ID, canonicalUrl: `https://claude.ai/chat/${ID}` },
     });
+  });
+});
+
+describe('new-chat entry points', () => {
+  it.each(['https://chatgpt.com/', 'https://chatgpt.com', 'https://chatgpt.com/?model=gpt-5', 'https://chatgpt.com/#settings'])(
+    'treats %s as a ChatGPT new chat',
+    (url) => {
+      expect(classifyUrl(url)).toEqual({ kind: 'new-chat', provider: 'chatgpt', origin: 'https://chatgpt.com' });
+    },
+  );
+
+  it.each(['https://claude.ai/new', 'https://claude.ai/new/', 'https://claude.ai/new?q=hello', 'https://claude.ai/'])(
+    'treats %s as a Claude new chat',
+    (url) => {
+      expect(classifyUrl(url)).toEqual({ kind: 'new-chat', provider: 'claude', origin: 'https://claude.ai' });
+    },
+  );
+
+  it('never invents a conversation identifier for a new chat', () => {
+    expect(classifyUrl('https://claude.ai/new')).not.toHaveProperty('conversation');
+  });
+
+  it.each([
+    // Temporary and incognito chats are never saved, so they never receive a conversation identifier.
+    ['https://chatgpt.com/?temporary-chat=true', 'chatgpt'],
+    ['https://claude.ai/new?incognito', 'claude'],
+    ['https://claude.ai/new?incognito=true', 'claude'],
+  ] as const)('does not offer the unsaved chat %s as a new chat', (url, provider) => {
+    expect(classifyUrl(url)).toEqual({ kind: 'provider-page', provider });
   });
 });
 
 describe('conversation versus provider page classification', () => {
   it.each([
-    'https://chatgpt.com/',
-    'https://chatgpt.com/?temporary-chat=true',
     `https://chatgpt.com/share/${ID}`,
     'https://chatgpt.com/g/g-abc123-writer',
+    // New chats inside a custom GPT or project are not modeled yet.
+    'https://chatgpt.com/g/g-p-67ab12cd-research/project',
     'https://chatgpt.com/c/',
     'https://chatgpt.com/c/not-a-conversation-id',
     `https://chatgpt.com/c/${ID}/extra`,
     `https://chatgpt.com/x/c/${ID}`,
-  ])('treats %s as a ChatGPT page without a recognized conversation', (url) => {
+    'https://chatgpt.com/new',
+    'https://chatgpt.com/gpts',
+    'https://chatgpt.com//',
+  ])('treats %s as a ChatGPT page without a conversation or new chat', (url) => {
     expect(classifyUrl(url)).toEqual({ kind: 'provider-page', provider: 'chatgpt' });
   });
 
   it.each([
-    'https://claude.ai/',
-    'https://claude.ai/new',
     'https://claude.ai/recents',
+    'https://claude.ai/NEW',
+    'https://claude.ai/new/extra',
+    'https://claude.ai/newchat',
+    'https://claude.ai/projects',
     `https://claude.ai/project/${ID}`,
     `https://claude.ai/chat/${ID}x`,
-  ])('treats %s as a Claude page without a recognized conversation', (url) => {
+    'https://claude.ai/settings/profile',
+  ])('treats %s as a Claude page without a conversation or new chat', (url) => {
     expect(classifyUrl(url)).toEqual({ kind: 'provider-page', provider: 'claude' });
   });
 });
@@ -104,8 +139,19 @@ describe('hostname spoofing and lookalike domains', () => {
     // Cyrillic letters that look like Latin ones (IDN homograph).
     `https://сhatgpt.com/c/${ID}`,
     `https://claudе.ai/chat/${ID}`,
+    // Spoofed new-chat entry points.
+    'https://chatgpt.com.evil.example/',
+    'http://chatgpt.com/',
+    'https://chatgpt.com:8443/',
+    'https://www.chatgpt.com/',
+    'https://claude.ai.evil.example/new',
+    'http://claude.ai/new',
+    'https://user@claude.ai/new',
+    'https://evil.example/new?next=https://claude.ai/new',
+    'https://сhatgpt.com/',
   ])('rejects %s', (url) => {
     expect(classifyUrl(url).kind).not.toBe('conversation');
+    expect(classifyUrl(url).kind).not.toBe('new-chat');
     expect(classifyUrl(url)).toEqual({ kind: 'unsupported' });
   });
 });
@@ -113,12 +159,29 @@ describe('hostname spoofing and lookalike domains', () => {
 describe('configurable rules', () => {
   it('uses the rules it is given, so URL patterns can change without touching the domain', () => {
     const recognizer = createConversationRecognizer([
-      { provider: 'claude', origin: 'https://claude.example', conversationPaths: [/^\/t\/(?<id>[a-z]+)$/] },
+      {
+        provider: 'claude',
+        origin: 'https://claude.example',
+        conversationPaths: [/^\/t\/(?<id>[a-z]+)$/],
+        newChatPaths: [/^\/start$/],
+        unsavedChatQueryParameters: [],
+      },
     ]);
     expect(recognizer.recognize('https://claude.example/t/abc')).toEqual({
       kind: 'conversation',
-      conversation: { provider: 'claude', conversationId: 'abc', canonicalUrl: 'https://claude.example/t/abc' },
+      conversation: {
+        provider: 'claude',
+        origin: 'https://claude.example',
+        conversationId: 'abc',
+        canonicalUrl: 'https://claude.example/t/abc',
+      },
     });
+    expect(recognizer.recognize('https://claude.example/start')).toEqual({
+      kind: 'new-chat',
+      provider: 'claude',
+      origin: 'https://claude.example',
+    });
+    expect(recognizer.recognize('https://claude.example/new')).toEqual({ kind: 'provider-page', provider: 'claude' });
     expect(recognizer.recognize(`https://claude.ai/chat/${ID}`)).toEqual({ kind: 'unsupported' });
   });
 });

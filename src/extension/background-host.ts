@@ -24,7 +24,9 @@ import {
   type ClientMessage,
   type ConnectionClientMessage,
   type HostMessage,
+  type PageCheckClientMessage,
 } from './protocol';
+import { createProviderTransport, type ProviderTransport } from './provider-transport';
 import { randomIds, systemClock } from './runtime-adapters';
 import { createSessionCheckpointStore } from './session-checkpoint-store';
 import { createSessionConnectionStore } from './session-connection-store';
@@ -39,11 +41,17 @@ type Port = Browser.runtime.Port;
  * terminated by Chrome at any time; the session is restored from the
  * checkpoint on the next start (see docs/architecture/runtime-and-recovery.md).
  *
- * It also hosts the conversation link coordinator (Phase 2.1). Links are
+ * It also hosts the conversation link coordinator (Phase 2.1; new chats with
+ * pending identities, Phase 2.2A). Links are
  * independent of the debate: the debate runner never sees them, and they are
  * stored under a separate key. Tab events keep links current while the worker
  * runs; because events are lost while it is suspended, links are also
  * reconciled with the open tabs on every start and every panel connection.
+ *
+ * It also hosts the provider page transport (Phase 2.2B foundation), which
+ * talks to the provider content scripts. The transport is independent of the
+ * debate and of the link state: a page check never changes a link, and the
+ * debate still uses the simulators. See docs/architecture/provider-transport.md.
  *
  * All listeners are registered synchronously, as MV3 requires.
  */
@@ -58,14 +66,22 @@ export function startBackgroundHost(): void {
     },
   });
 
+  const recognizer = createConversationRecognizer();
   const connections = createConnectionCoordinator({
     tabs: createChromeTabSource(browser.tabs),
-    recognizer: createConversationRecognizer(),
-    store: createSessionConnectionStore(),
+    recognizer,
+    store: createSessionConnectionStore(recognizer),
     reportError: (error) => {
       // Never include tab URLs or titles here; Chrome and storage errors do not contain them.
       console.error('[ThirdMind] Conversation links:', error);
     },
+  });
+
+  const transport = createProviderTransport({
+    tabs: browser.tabs,
+    extensionId: browser.runtime.id,
+    recognizer,
+    ids: randomIds,
   });
 
   const ports = new Set<Port>();
@@ -91,9 +107,22 @@ export function startBackgroundHost(): void {
   });
 
   watchTabEvents(browser.tabs, {
-    tabChanged: (tabId, url) => void connections.tabChanged(tabId, url),
-    tabRemoved: (tabId) => void connections.tabRemoved(tabId),
+    tabChanged: (tabId, url) => {
+      transport.tabChanged(tabId, url);
+      void connections.tabChanged(tabId, url);
+    },
+    tabRemoved: (tabId) => {
+      transport.tabRemoved(tabId);
+      void connections.tabRemoved(tabId);
+    },
     rescan: () => void connections.refresh(),
+  });
+
+  // One-off messages come only from the provider content scripts (the panel uses its port). The transport
+  // validates the sender of each one; nothing is ever answered, so a page learns nothing from sending.
+  browser.runtime.onMessage.addListener((raw: unknown, sender) => {
+    transport.receivePageMessage(raw, sender);
+    return undefined;
   });
 
   browser.runtime.onConnect.addListener((port) => {
@@ -109,6 +138,8 @@ export function startBackgroundHost(): void {
       const message = parseClientMessage(raw);
       if (message === null) {
         post(port, { type: 'command-rejected', command: 'unknown', reason: 'The message was not understood.' });
+      } else if (message.type === 'check-provider-page') {
+        void handlePageCheck(connections, transport, ports, port, message);
       } else if (isConnectionMessage(message)) {
         // The coordinator queues commands behind its own initialization.
         void handleConnectionMessage(connections, port, message);
@@ -132,10 +163,52 @@ export function startBackgroundHost(): void {
   });
 }
 
+type DebateClientMessage = Exclude<ClientMessage, ConnectionClientMessage | PageCheckClientMessage>;
+
+/**
+ * Checks the page connection of the provider's linked tab. The links are
+ * reconciled first, so the tab is validated against a fresh tab scan, and the
+ * transport validates it again before and after its request. The result is
+ * diagnostic only: it never changes the link or the debate.
+ */
+async function handlePageCheck(
+  connections: ConnectionCoordinator,
+  transport: ProviderTransport,
+  ports: ReadonlySet<Port>,
+  port: Port,
+  message: PageCheckClientMessage,
+): Promise<void> {
+  try {
+    await connections.refresh();
+    const link = connections.getSnapshot().registry[message.provider].link;
+    if (link?.state.kind !== 'linked') {
+      post(port, {
+        type: 'command-rejected',
+        command: message.type,
+        reason: 'Only a linked tab that still shows its conversation or new chat can be checked.',
+      });
+      post(port, connectionsMessage(connections));
+      return;
+    }
+    const result = await transport.probe(link.tabId, message.provider);
+    const reply: HostMessage = { type: 'page-check', check: { provider: message.provider, tabId: link.tabId, result } };
+    for (const target of ports) {
+      post(target, reply);
+    }
+  } catch (error) {
+    console.error('[ThirdMind] Page check:', error);
+    post(port, {
+      type: 'command-rejected',
+      command: message.type,
+      reason: 'An internal error occurred. See the service worker console for details.',
+    });
+  }
+}
+
 async function handleMessage(
   runner: DebateRunner<SimulationSetup>,
   port: Port,
-  message: Exclude<ClientMessage, ConnectionClientMessage>,
+  message: DebateClientMessage,
 ): Promise<void> {
   let result: RunnerResult;
   try {
@@ -151,10 +224,7 @@ async function handleMessage(
   }
 }
 
-function dispatch(
-  runner: DebateRunner<SimulationSetup>,
-  message: Exclude<ClientMessage, ConnectionClientMessage>,
-): Promise<RunnerResult> {
+function dispatch(runner: DebateRunner<SimulationSetup>, message: DebateClientMessage): Promise<RunnerResult> {
   switch (message.type) {
     case 'start':
       return runner.start({
@@ -206,6 +276,10 @@ async function dispatchConnection(
       return { ok: true };
     case 'link-conversation':
       return connections.link(message);
+    case 'link-new-chat':
+      return connections.linkNewChat(message);
+    case 'confirm-conversation-identity':
+      return connections.confirmIdentity(message);
     case 'reconnect-conversation':
       return connections.reconnect(message);
     case 'disconnect-conversation':

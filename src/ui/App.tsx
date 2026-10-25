@@ -75,11 +75,11 @@ export function App() {
         )}
 
         {/* Independent of the simulated debate above: links are tracked separately and never used by the debate. */}
-        <ConversationConnections view={host.connections} onCommand={send} />
+        <ConversationConnections view={host.connections} pageChecks={host.pageChecks} onCommand={send} />
       </main>
       <footer className="footer muted">
-        Preview. Debate responses come from local simulators. Linked conversations are only associated by tab;
-        ThirdMind does not read or send messages in ChatGPT or Claude.
+        Preview. Debate responses come from local simulators. Linked conversations are only associated by tab; a page
+        check reads only whether the page is ready. ThirdMind does not read or send messages in ChatGPT or Claude.
       </footer>
     </div>
   );

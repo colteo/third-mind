@@ -1,14 +1,18 @@
 import {
   EMPTY_CONNECTION_REGISTRY,
+  confirmConversationIdentity,
   linkConversation,
+  linkNewChat,
   reconcileRegistry,
   reconnectConversation,
   disconnectConversation,
   type BrowserTabId,
+  type ConfirmIdentityRequest,
   type ConnectionChange,
   type ConnectionRegistry,
   type DisconnectRequest,
   type LinkRequest,
+  type NewChatLinkRequest,
   type ObservedTab,
   type ReconnectRequest,
   type TabObservation,
@@ -52,6 +56,10 @@ export interface ConnectionCoordinator {
   /** A tab was closed (or replaced). Idempotent. Never rejects. */
   tabRemoved(tabId: BrowserTabId): Promise<void>;
   link(request: LinkRequest): Promise<RunnerResult>;
+  /** Links a new, empty chat with a pending identity. */
+  linkNewChat(request: NewChatLinkRequest): Promise<RunnerResult>;
+  /** Accepts the conversation a linked new chat's tab now shows, when it could not be attributed automatically. */
+  confirmIdentity(request: ConfirmIdentityRequest): Promise<RunnerResult>;
   reconnect(request: ReconnectRequest): Promise<RunnerResult>;
   disconnect(request: DisconnectRequest): Promise<RunnerResult>;
 }
@@ -65,11 +73,15 @@ export const MAX_TAB_TITLE_LENGTH = 200;
  * human commands never interleave. Links are persisted after every change.
  *
  * It never reads page content and never contacts a provider: the only input
- * is the list of open tabs (id, URL, title).
+ * is the list of open tabs (id, URL, title). Every command rescans first and
+ * checks the request against the fresh observation of its tab, so a tab id
+ * sent by a client is never trusted on its own.
  */
 export function createConnectionCoordinator(deps: ConnectionCoordinatorDependencies): ConnectionCoordinator {
   let registry: ConnectionRegistry = EMPTY_CONNECTION_REGISTRY;
   let discovery: TabDiscovery = { status: 'pending' };
+  /** `null` until a scan succeeded in this runtime, and after a failed scan: continuity is not established. */
+  let previousTabs: readonly ObservedTab[] | null = null;
   let queue: Promise<unknown> = Promise.resolve();
   let pendingRefresh: Promise<void> | null = null;
   const listeners = new Set<ConnectionsListener>();
@@ -112,8 +124,14 @@ export function createConnectionCoordinator(deps: ConnectionCoordinatorDependenc
     }
   };
 
-  /** Scans all tabs. Returns the observations, or `null` if the browser could not be queried. */
+  /**
+   * Scans all tabs. Returns the observations, or `null` if the browser could
+   * not be queried. The provider tabs of the previous successful scan are
+   * kept in `previousTabs` so pending new chats can tell a direct transition
+   * from one that happened while ThirdMind was not watching.
+   */
   const scan = async (): Promise<ReadonlyMap<BrowserTabId, ObservedTab> | null> => {
+    previousTabs = discovery.status === 'ready' ? discovery.tabs : null;
     const result = await deps.tabs.listTabs();
     if (!result.ok) {
       discovery = { status: 'failed', reason: result.reason };
@@ -138,13 +156,17 @@ export function createConnectionCoordinator(deps: ConnectionCoordinatorDependenc
   const scanAndReconcile = async (): Promise<ReadonlyMap<BrowserTabId, ObservedTab> | null> => {
     const observed = await scan();
     await commit(
-      reconcileRegistry(registry, (tabId): TabObservation => {
-        if (observed === null) {
-          return { kind: 'unknown' };
-        }
-        const tab = observed.get(tabId);
-        return tab === undefined ? { kind: 'missing' } : { kind: 'present', tab };
-      }),
+      reconcileRegistry(
+        registry,
+        (tabId): TabObservation => {
+          if (observed === null) {
+            return { kind: 'unknown' };
+          }
+          const tab = observed.get(tabId);
+          return tab === undefined ? { kind: 'missing' } : { kind: 'present', tab };
+        },
+        { previousTabs, currentTabs: discovery.status === 'ready' ? discovery.tabs : [] },
+      ),
     );
     publish();
     return observed;
@@ -227,6 +249,11 @@ export function createConnectionCoordinator(deps: ConnectionCoordinatorDependenc
 
     link: (request) => command(request.tabId, (tab) => linkConversation(registry, request, tab)),
 
+    linkNewChat: (request) => command(request.tabId, (tab) => linkNewChat(registry, request, tab)),
+
+    confirmIdentity: (request) =>
+      command(request.tabId, (tab) => confirmConversationIdentity(registry, request, tab)),
+
     reconnect: (request) => command(request.tabId, (tab) => reconnectConversation(registry, request, tab)),
 
     disconnect: (request) => enqueue(() => applyChange(disconnectConversation(registry, request))),
@@ -244,7 +271,8 @@ function observeTab(tab: BrowserTabInfo, recognizer: ConversationRecognizer): Ob
 }
 
 function isProviderTab(tab: ObservedTab): boolean {
-  return tab.classification.kind === 'conversation' || tab.classification.kind === 'provider-page';
+  const { kind } = tab.classification;
+  return kind === 'conversation' || kind === 'new-chat' || kind === 'provider-page';
 }
 
 export function sanitizeTitle(title: string | null): string | null {

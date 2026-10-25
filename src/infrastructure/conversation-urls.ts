@@ -2,7 +2,7 @@ import type { ConversationProviderId, UrlClassification } from '../domain';
 import type { ConversationRecognizer } from '../ports';
 
 /**
- * Provider URL rules (Phase 2.1).
+ * Provider URL rules (Phase 2.1, new-chat entry points Phase 2.2A).
  *
  * These describe the providers' current websites and will change when the
  * providers change them. They are configuration, not domain rules: the domain
@@ -10,9 +10,13 @@ import type { ConversationRecognizer } from '../ports';
  *
  * Matching is done on the parsed URL: the origin must be exactly equal to the
  * rule's origin (scheme, host and port), and the path must match one of the
- * anchored conversation patterns. Substring matching is never used, so
- * lookalike hosts (`chatgpt.com.example.net`, `evil-claude.ai`) and URLs that
- * merely mention a provider in their path or query are rejected.
+ * anchored patterns. Substring matching is never used, so lookalike hosts
+ * (`chatgpt.com.example.net`, `evil-claude.ai`) and URLs that merely mention a
+ * provider in their path or query are rejected.
+ *
+ * Every other path on a supported origin is a `provider-page`: it is listed
+ * as "not a conversation or new chat" and can never be linked. A new path
+ * only becomes linkable once it is modeled here explicitly.
  */
 export interface ProviderUrlRule {
   readonly provider: ConversationProviderId;
@@ -23,6 +27,14 @@ export interface ProviderUrlRule {
    * conversation identifier in a named group `id`.
    */
   readonly conversationPaths: readonly RegExp[];
+  /** Anchored path patterns of confirmed new-chat entry points (pages that start an empty, unsaved chat). */
+  readonly newChatPaths: readonly RegExp[];
+  /**
+   * Query parameters that turn a new-chat entry point into a chat the
+   * provider does not save (for example, temporary chats). Such a page never
+   * receives a conversation identifier, so it is not offered as a new chat.
+   */
+  readonly unsavedChatQueryParameters: readonly string[];
 }
 
 /** Conversation identifiers on both sites are UUIDs today. */
@@ -38,6 +50,11 @@ export const PROVIDER_URL_RULES: readonly ProviderUrlRule[] = [
       // Conversations inside a custom GPT or a project: https://chatgpt.com/g/<g-…>/c/<uuid>
       new RegExp(`^/g/g-[A-Za-z0-9_-]+/c/(?<id>${UUID})/?$`),
     ],
+    // The home page is ChatGPT's new-chat page; the first message moves the tab to /c/<uuid>.
+    // New chats inside a custom GPT or project (/g/…) are not modeled yet and stay provider pages.
+    newChatPaths: [/^\/$/],
+    // https://chatgpt.com/?temporary-chat=true is never saved and never gets a conversation URL.
+    unsavedChatQueryParameters: ['temporary-chat'],
   },
   {
     provider: 'claude',
@@ -46,6 +63,14 @@ export const PROVIDER_URL_RULES: readonly ProviderUrlRule[] = [
       // https://claude.ai/chat/<uuid>
       new RegExp(`^/chat/(?<id>${UUID})/?$`),
     ],
+    // https://claude.ai/new is the new-chat page. The site root is accepted as the same entry point,
+    // because for signed-in users it shows the new-chat page (manually observed, not guaranteed).
+    // A link created on `/` stays pending until the tab moves to /chat/<uuid>, so a root page that
+    // never starts a chat (for example, a signed-out landing page) is harmless.
+    newChatPaths: [/^\/new\/?$/, /^\/$/],
+    // Incognito chats are not saved to the chat history. Whether they ever receive a /chat/ URL is
+    // unverified, so they are not offered as new chats.
+    unsavedChatQueryParameters: ['incognito'],
   },
 ];
 
@@ -81,13 +106,19 @@ export function classifyUrl(url: string, rules: readonly ProviderUrlRule[] = PRO
         kind: 'conversation',
         conversation: {
           provider: rule.provider,
+          origin: rule.origin,
           conversationId,
           canonicalUrl: `${rule.origin}${path.slice(0, path.length - id.length)}${conversationId}`,
         },
       };
     }
   }
-  return { kind: 'provider-page', provider: rule.provider };
+  const isNewChat =
+    rule.newChatPaths.some((pattern) => pattern.test(parsed.pathname)) &&
+    !rule.unsavedChatQueryParameters.some((name) => parsed.searchParams.has(name));
+  return isNewChat
+    ? { kind: 'new-chat', provider: rule.provider, origin: rule.origin }
+    : { kind: 'provider-page', provider: rule.provider };
 }
 
 export function createConversationRecognizer(

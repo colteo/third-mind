@@ -15,6 +15,9 @@
 | Tabs API adapter              | Vitest, mocked `chrome.tabs` object    | `src/extension/chrome-tabs.test.ts`                        |
 | Connection store              | Vitest, mocked `wxt/browser` storage   | `src/extension/session-connection-store.test.ts`           |
 | Connections panel (React)     | Vitest, `react-dom/server` static render | `src/ui/components/ConversationConnections.test.ts`      |
+| Provider page readiness rules | Vitest, fake page environments         | `src/infrastructure/provider-pages.test.ts`                |
+| Provider transport protocol   | Vitest                                 | `src/extension/provider-transport-protocol.test.ts`        |
+| Provider transport (worker and content script handler) | Vitest, mocked `chrome.tabs`, real content script handler on fake pages, fake timers | `src/extension/provider-transport.test.ts` |
 | Real Chrome behaviour, other React UI | Manual (see README)            | none                                                       |
 
 The result view test renders `ResultsView` with `renderToStaticMarkup` in the Node environment, so it needs no DOM library or extra dependency. It checks which tab is selected and which panel is hidden for each view, and that both views describe the same session. Click handling is not exercised without a DOM; the keyboard logic is tested through the pure `nextResultView`.
@@ -72,6 +75,45 @@ The domain tests drive the engine through a small synchronous shell (`settle` an
 | 17 | Missing permission or failed tab queries      | `chrome-tabs.test.ts`; `connection-coordinator.test.ts` → failed tab queries       |
 | 18 | Isolation between simulation and link metadata | `session-connection-store.test.ts` → isolation…; `protocol.test.ts` → keeps debate snapshots and connection views apart |
 
+### New chats and identity reconciliation (Phase 2.2A)
+
+| #  | Behaviour                                     | Test (file → describe block)                                                       |
+| -- | --------------------------------------------- | ---------------------------------------------------------------------------------- |
+| 19 | Valid ChatGPT and Claude new-chat URLs        | `conversation-urls.test.ts` → new-chat entry points                                |
+| 20 | Unsupported provider paths stay unlinkable    | `conversation-urls.test.ts` → conversation versus provider page classification; new-chat entry points (temporary and incognito chats) |
+| 21 | Spoofed new-chat origins                      | `conversation-urls.test.ts` → hostname spoofing and lookalike domains; coordinator → new chat discovery |
+| 22 | Explicit pending link creation                | `connections.test.ts` → explicit new chat linking; coordinator → explicit new chat linking |
+| 23 | Successful identity reconciliation            | `connections.test.ts` → identity reconciliation of a pending new chat; coordinator → identity reconciliation |
+| 24 | Ambiguous transition requiring confirmation   | `connections.test.ts` → identity reconciliation…, explicit identity confirmation; coordinator → service worker recovery of new chats |
+| 25 | Switching to an unrelated conversation        | `connections.test.ts` → identity reconciliation… (already open elsewhere, other provider, other origin); coordinator → identity reconciliation |
+| 26 | Closing a pending tab; reopening the provider | `connections.test.ts` → identity reconciliation…; coordinator → closing and reopening a pending new chat |
+| 27 | Tab id reuse                                  | `connections.test.ts` → identity reconciliation… (tab id reuse); coordinator → service worker recovery of new chats |
+| 28 | Service worker recovery                       | coordinator → service worker recovery of new chats                                 |
+| 29 | Multiple tabs from the same provider          | coordinator → identity reconciliation (other tabs of the same provider)            |
+| 30 | Saved-conversation linking regression         | all Phase 2.1 tests above, unchanged in intent; coordinator → explicit new chat linking (saved link next to a pending one) |
+| 31 | Simulator regression                          | `engine.test.ts`, `debate-runner.test.ts`, `mock-provider.test.ts` (unchanged)     |
+| 32 | Invalid and stale protocol requests           | `protocol.test.ts` → connection message parsing, message routing; coordinator → stale identity confirmation requests |
+| 33 | Storage schema migration                      | `connections.test.ts` → migration of version 1 registries; `session-connection-store.test.ts` → migration from the Phase 2.1 schema |
+
+### Provider page transport (Phase 2.2B foundation)
+
+| #  | Behaviour                                     | Test (file → describe block)                                                       |
+| -- | --------------------------------------------- | ---------------------------------------------------------------------------------- |
+| 34 | Valid provider origin                         | `provider-transport.test.ts` → valid provider origin; `provider-transport-protocol.test.ts` → message senders |
+| 35 | Invalid provider origin (lookalike, query, scheme, port, other provider) | `provider-transport.test.ts` → invalid provider origin; `provider-pages.test.ts` → provider-specific readiness detection |
+| 36 | Missing content script                        | `provider-transport.test.ts` → missing content script; transport timeout (synchronous throw) |
+| 37 | Closed tab (before and during a request)      | `provider-transport.test.ts` → closed tab                                          |
+| 38 | Navigation during a request (event, missed event, reload, other document, other request, back/forward cache) | `provider-transport.test.ts` → navigation during a request |
+| 39 | Worker restart                                | `provider-transport.test.ts` → worker restart                                      |
+| 40 | Incorrect message sender (both directions)    | `provider-transport.test.ts` → incorrect message sender; `provider-transport-protocol.test.ts` → message senders |
+| 41 | Unsupported page                              | `provider-transport.test.ts` → unsupported page                                    |
+| 42 | Transport timeout (outcome unknown, late answers ignored) | `provider-transport.test.ts` → transport timeout                       |
+| 43 | Provider-specific readiness detection         | `provider-pages.test.ts`; `provider-transport.test.ts` → provider-specific readiness detection |
+| 44 | Malformed messages and dropped extra fields   | `provider-transport-protocol.test.ts` → provider transport message parsing         |
+| 45 | Panel page check: provider only, no tab or code | `protocol.test.ts` → page check messages; `ConversationConnections.test.ts` → page connection checks |
+
+The transport tests run the real content script handler (`handleTransportRequest`) on fake page environments behind a fake `chrome.tabs`, so the request and answer pass through both parsers and both sender checks. They do not load the content scripts into Chrome, do not run against chatgpt.com or claude.ai, and do not verify the composer selectors. That is covered only by the manual smoke test in the README.
+
 These tests use mocked Chrome APIs. They do not prove that real Chrome delivers tab events, suspends the worker or reports URLs as assumed. That is covered by the manual smoke test in the README.
 
 ## Coverage
@@ -80,7 +122,7 @@ These tests use mocked Chrome APIs. They do not prove that real Chrome delivers 
 npm run test:coverage
 ```
 
-This writes a text summary to the console and an HTML report to `coverage/index.html`, using the V8 provider. Coverage covers `domain`, `application`, `infrastructure`, `extension/protocol.ts`, `extension/chrome-tabs.ts` and `extension/session-connection-store.ts`. No coverage figures are recorded in this repository. They have to be produced by running the command.
+This writes a text summary to the console and an HTML report to `coverage/index.html`, using the V8 provider. Coverage covers `domain`, `application`, `infrastructure`, `extension/protocol.ts`, `extension/chrome-tabs.ts`, `extension/session-connection-store.ts`, `extension/provider-transport.ts`, `extension/provider-transport-protocol.ts` and `extension/provider-content-script.ts` (whose live entry point, `startProviderContentScript`, is not exercised). No coverage figures are recorded in this repository. They have to be produced by running the command.
 
 ## Deferred: end-to-end browser tests
 

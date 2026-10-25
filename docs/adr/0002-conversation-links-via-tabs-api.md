@@ -1,6 +1,6 @@
 # ADR 0002: Conversation links through the Tabs API, separate from the debate
 
-- **Status:** Accepted
+- **Status:** Accepted. Decision 1 ("no content scripts") is amended by [ADR 0004](0004-provider-content-script-boundary.md), which adds readiness-only content scripts for the two provider origins; tab discovery and linking still use only the Tabs API.
 - **Scope:** Phase 2.1 (conversation linking)
 
 ## Context
